@@ -25,7 +25,9 @@ ZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ
 ZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ
 ZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ
 ZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ
-ZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxexxxxxxxpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ
+ZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ
+ZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ
+Zxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx2xxxxxxx1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ
 ZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ
 ZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ
 Zxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx000000000000000xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ
@@ -57,6 +59,7 @@ allLevels = {
 allLegends = {
     1: default_legend
 }
+
 def load_level(level_num,LevelList,LegendList):
     global level
 
@@ -67,10 +70,6 @@ def load_level(level_num,LevelList,LegendList):
     layout = LevelList[level_num]
     level = TileMap(layout, legend, tile_size=32, solid="0#")
 
-#==========================================================
-# CONTROLS (one dictionary per player, so adding a player = adding a dictionary)
-# Values are key names GameSnake understands. Use None for a player with no input (dummies).
-#==========================================================
 
 P1_CONTROLS = {"left": "a", "right": "d", "up": "w", "down": "s",
                "jump": "space", "dash": "left shift", "parry": "q",
@@ -80,13 +79,40 @@ P2_CONTROLS = {"left": "left", "right": "right", "up": "up", "down": "down",
                "jump": "right shift", "dash": "right ctrl", "parry": "/",
                "heavy": ".", "light": ","}
 
+# Controller bindings (shared by every controller). Names: a b x y  lb rb  lt rt  start back  l3 r3
+# "left" "right" "up" "down" mean left stick OR d-pad. A binding can be one name or a tuple of names.
+# Buttons are named by POSITION, so "a" is the bottom face button (Cross on PlayStation).
+PAD_CONTROLS = {"left": "left", "right": "right", "up": "up", "down": "down",
+                "jump": "a", "dash": "rt", "parry": "lt",
+                "heavy": "y", "light": "x"}
+
+#==========================================================
+# MOVEMENT TUNING
+#==========================================================
+
+# How many frames you can still jump after leaving the ground. It's also how the game knows you're standing on
+# something: touching the floor sets coyote_time to COYOTE_TIME, and "exactly COYOTE_TIME" means "grounded this frame".
+COYOTE_TIME = 15
+
 #==========================================================
 # PARRY / RIPOSTE TUNING
 #==========================================================
 
-PARRY_STUN = 70          # frames an attacker is stunned (and open to a riposte) after being parried
+PARRY_STUN = 180          # frames an attacker is stunned (and open to a riposte) after being parried
 RIPOSTE_RANGE_X = 80     # how close you must be to a parried player for neutral+light to become a riposte
 RIPOSTE_RANGE_Y = 45
+
+#==========================================================
+# VFX
+#==========================================================
+
+HITSTOP_MIN_DAMAGE = 8   # hits weaker than this don't freeze the game at all
+HITSTOP_DIVISOR = 3      # frames frozen = damage / this
+HITSTOP_MAX = 30         # never freeze for longer than this many frames
+
+BLOOD = ["darkred", (150, 0, 0), (200, 10, 10)]   # every blood particle picks one of these
+BLOOD_PER_DAMAGE = 1.5   # blood particles = 4 + damage * this
+BLOOD_MAX = 70
 
 #CLASSES
 
@@ -105,11 +131,12 @@ class Hitbox: # Damaging Hitboxes
       "radial" - straight away from the centre of this hitbox (explosions)
       "pull"   - horizontally TOWARDS the owner, vertical part still comes from angle (inverse knockback)
     """
-    def __init__(self, owner, width, height, offset, damage, kbx, kby, angle, stun, mode="angle", colour="red"):
+    def __init__(self, owner, width, height, offset, damage, kbx, kby, angle, stun, mode="angle", colour="red", hitstop=None):
         self.owner = owner
         self.offset = offset
         self.damage, self.kbx, self.kby, self.angle, self.stun = damage, kbx, kby, angle, stun
         self.mode = mode
+        self.hitstop = hitstop            # frames to freeze the game on hit. None = worked out from damage, 0 = never
         self.zone = Zone(0, 0, width, height, colour)
         self.already_hit = set()
         self.active = False
@@ -142,16 +169,31 @@ class Hitbox: # Damaging Hitboxes
 
     def hit(self, target, facing):
         if target.parrying:
+            # Parry Colour Burst
+            Particles.burst(
+                target.x, target.y,
+                count=70,
+                colour=(100, 50, 255),
+                speed=(10, 12),
+                life=(30, 60),
+                size=(3, 7),
+                gravity=0,
+                drag=0.98
+            )
             if self.projectile:
                 self.projectile.reflect(target)        # parried projectile: sent back at the thrower
             else:
                 self.owner.on_parried(target)          # parried melee: attacker is stunned and left open
             target.on_parry_success()
             return False
-
+        hitsfx = ["Dmg","Dmg2","Dmg3"]
+        Sound.play(hitsfx[random_number(0,2)])
         target.health += self.damage
         scale = (target.health / 200) + 1
         a = math.radians(self.angle)
+        if not self.projectile:
+            self.owner.dash_charges = 1
+            self.owner.jump_charges = 1
 
         if self.mode == "radial":
             dx = target.x - self.zone.x
@@ -169,7 +211,32 @@ class Hitbox: # Damaging Hitboxes
         target.y_velocity = vy * self.kby * scale
         target.actionableTimer = self.stun
         target.NoGravTimer = 0
+
+        self.hit_effects(target)
         return True
+
+    def hitstop_frames(self):
+        if self.hitstop is not None:
+            Sound.play("Heavy Hitter")
+            return self.hitstop
+        if self.damage < HITSTOP_MIN_DAMAGE:
+            return 0
+        Sound.play("Heavy Hitter")
+        return min(HITSTOP_MAX, round(self.damage / HITSTOP_DIVISOR))
+
+    def hit_effects(self, target):
+        # Blood sprays the way the victim is being launched (GameSnake angles: 0 = up, 90 = right)
+        vx, vy = target.x_velocity, target.y_velocity
+        direction = None if abs(vx) + abs(vy) < 0.1 else math.degrees(math.atan2(vx, -vy)) % 360
+        amount = min(BLOOD_MAX, int(4 + self.damage * BLOOD_PER_DAMAGE))
+        Particles.burst(target.x, target.y, count=amount, colour=BLOOD,
+                        direction=direction, spread=70, speed=(3, 9), life=(15, 35), size=(2, 4), gravity=0.3)
+        Particles.burst(target.x, target.y, count=amount // 3, colour=BLOOD,      # a smaller mist going every direction
+                        speed=(1, 3), life=(10, 20), size=(1, 3), gravity=0.1)
+
+        frames = self.hitstop_frames()
+        if frames > 0:
+            Screen.hitstop(frames)
 
     def delete(self):
         if not self._deleted:
@@ -213,10 +280,11 @@ class Attack(Move):
     """The simple move: startup -> active -> recovery, with a single hitbox.
     on_fire(owner)    - called once on the first active frame (recoil, spawning projectiles...)
     on_connect(owner) - called whenever the hitbox lands a hit (pogo bounce...)
+    hitstop           - frames to freeze the game when it lands (None = worked out from damage, 0 = never)
     active=0 gives a move that never hits, handy for throws that only spawn a projectile."""
     def __init__(self, owner, width, height, offset, startup, active, recovery,
                  damage, knockbackx, knockbacky, angle, stun,
-                 mode="angle", on_fire=None, on_connect=None):
+                 mode="angle", on_fire=None, on_connect=None, hitstop=None):
         super().__init__(owner)
         self.startup, self.active, self.recovery = startup, active, recovery
         self.total_frames = startup + active + recovery
@@ -224,7 +292,7 @@ class Attack(Move):
         self.on_fire = on_fire
         self.on_connect = on_connect
         self.hitbox = self.add_hitbox(Hitbox(owner, width, height, offset,
-                                             damage, knockbackx, knockbacky, angle, stun, mode))
+                                             damage, knockbackx, knockbacky, angle, stun, mode, hitstop=hitstop))
 
     def is_active(self):
         return self.startup <= self.frame < self.startup + self.active
@@ -285,9 +353,10 @@ class Projectile: #Player Attack Projectiles
 
 class Player(Sprite): #Generalised Player, Superclass for each Character
 
-    def __init__(self,currentLevel, name, x=None, y=None, size=100, spawnIcon = "p", controls=None):
+    def __init__(self,currentLevel, name, x=None, y=None, size=100, spawnIcon = "p", controls=None, pad=None):
         super().__init__(name, x, y, size)
-        self.controls = controls          # a controls dictionary, or None for no input
+        self.controls = controls          # a keyboard controls dictionary, or None for no keyboard input
+        self.pad = pad                    # which controller slot drives this player (0 = first), or None
         self.spawnIcon = spawnIcon
         self.max_speed = 7
         self.walk_acceleration = 3
@@ -327,11 +396,17 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
     # Everything reads input through these, so no code mentions a specific key.
     # Actions: left right up down jump dash parry heavy light
 
+    # A player can use the keyboard, a controller, or both at once.
+
     def held(self, action):
-        return self.controls is not None and Keyboard.held(self.controls[action])
+        if self.controls is not None and Keyboard.held(self.controls[action]):
+            return True
+        return self.pad is not None and Gamepad.held(self.pad, PAD_CONTROLS[action])
 
     def pressed(self, action):
-        return self.controls is not None and Keyboard.pressed(self.controls[action])
+        if self.controls is not None and Keyboard.pressed(self.controls[action]):
+            return True
+        return self.pad is not None and Gamepad.pressed(self.pad, PAD_CONTROLS[action])
 
     #---------------- movement ----------------
 
@@ -378,9 +453,10 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
             elif self.jump_buffer != 0 and self.coyote_time != 0:
                 self.y_velocity = -self.jump_velocity
                 self.jump_buffer = 0
+                self.coyote_time = 0          # the jump uses up the grace window, so you can't jump from it again
 
             #Walk Logic
-            if self.coyote_time == 4: #A Grounded Check
+            if self.coyote_time == COYOTE_TIME - 1: #A Grounded Check (one frame has already counted down)
 
                 if self.held("left"):
                     if self.x_velocity > -self.max_speed:
@@ -418,7 +494,7 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
                         elif self.x_velocity < 0:
                             currentInputDir = -1
                         else:
-                            currentInputDir = 1    #Fallback failsafe for if you just dash without moving like a fool
+                            currentInputDir = 1 * self.facing   #Move in last direction facing for if you just dash without moving like a fool
                     self.x_velocity = self.dash_speed * currentInputDir
                     self.actionableTimer = 10
                     self.dash_timer = 10
@@ -426,14 +502,25 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
                     self.y_velocity = 0
 
             if self.pressed("parry") and self.parryCooldown == 0:
-                self.actionableTimer = 20
-                self.parryTimer = 10
+                # Parry Colour Burst
+                Particles.burst(
+                    self.x, self.y,
+                    count=70,
+                    colour=(0, 255, 255),
+                    speed=(3, 12),
+                    life=(10, 20),
+                    size=(3, 7),
+                    gravity=0,
+                    drag=0.98
+                )
+                self.actionableTimer = 30
+                self.parryTimer = 20
                 self.x_velocity = 0
                 self.y_velocity = 0
                 self.NoGravTimer = 20
                 self.parryCooldown = 50
 
-        if self.coyote_time == 4: # Friction Sepreate of actionability
+        if self.coyote_time == COYOTE_TIME - 1: # Friction Sepreate of actionability
             #Calculate Ground Friction
                 if self.x_velocity > 0:
                     self.x_velocity -= self.walk_decceleration
@@ -461,7 +548,7 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
 
         self.y += self.y_velocity
         if currentLevel.touching(self):
-            self.coyote_time = 5
+            self.coyote_time = COYOTE_TIME
             self.y = old_y
             if not self.y_velocity < 0:
                 self.dash_charges = self.max_dash_charges
@@ -554,32 +641,137 @@ class Dummy(Player):
         super().__init__(currentLevel, name, x, y, size, spawnIcon, controls=None)
 
 #==========================================================
+# CHARACTER: VEN- special moves (multi-stage, so they get their own classes)
+#==========================================================
+class BlastBouncer(Move):
+    """Shoot Downward, and Launch yourself upward"""
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.state, self.timer = "startup", 20
+        self.fall_frames = 0
+        self.rise = self.add_hitbox(Hitbox(owner, 70, 150, (0, 75), damage=7, kbx=5, kby=25, angle=-90, stun=20))
+        Sound.play("BlastBouncePrepare")
+
+    def update(self, targets):
+        o = self.owner
+        self.timer -= 1
+        for hb in self.hitboxes:
+            hb.place(o.x, o.y, self.facing)
+
+        if self.state == "startup":
+            self.owner.y_velocity = 0
+            self.owner.x_velocity = 0
+            if self.timer <= 0:
+                self.state, self.timer = "rise", 7
+                o.NoGravTimer = 12
+                o.y_velocity = -9
+                o.x_velocity = 5 * self.facing
+                self.rise.set_active(True)
+                Sound.play("BlastBounceFire")
+
+        elif self.state == "rise":
+            self.rise.check(targets, self.facing)
+            if self.timer <= 0:
+                self.state = "recovery"
+                self.rise.set_active(False)
+                o.x_velocity = 3 * self.facing
+                self.owner.special_ammo -= 1
+
+        elif self.state == "recovery":
+            if self.timer <= 0:
+                self.end()
+
+#==========================================================
 # CHARACTER: VEN
 #==========================================================
 
 class Ven(Player):
 
-    def __init__(self, currentLevel, name, x=None, y=None, size=100, spawnIcon="p", controls=None):
-        super().__init__(currentLevel, name, x, y, size, spawnIcon, controls)
+    def __init__(self, currentLevel, name, x=None, y=None, size=100, spawnIcon="p", controls=None, pad=None):
+        super().__init__(currentLevel, name, x, y, size, spawnIcon, controls, pad)
+        self.special_ammo = 2
+
+    def handle_movement(self, currentLevel):
+        grounded = self.coyote_time == COYOTE_TIME
+        if grounded: self.special_ammo = 2
+        return super().handle_movement(currentLevel)
+
+    def reset_state(self):
+        super().reset_state()
+        self.stored_charge = 0
 
     def attackChecks(self, targets=()):
-        if self.actionable:
-            if self.pressed("heavy"):
-                if self.coyote_time == 5:
-                    if self.held("down"):
-                        self.rifle_shot()
-                    elif self.held("left") or self.held("right"):
-                        pass
-                    elif self.held("up"):
-                        pass
-                    else:
-                        self.shotgun_blast()
+        if not self.actionable:
+            return
+
+        heavy = self.pressed("heavy")
+        light = self.pressed("light")
+        if not (heavy or light):
+            return
+
+        grounded = self.coyote_time == COYOTE_TIME
+        down = self.held("down")
+        side = self.held("left") or self.held("right")
+        up = self.held("up")
+        if heavy:
+            if down and self.special_ammo >0:
+                self.rifle_shot()
+            elif up and self.special_ammo > 0:
+                self.blast_bouncer()
+            elif side and self.special_ammo > 0:
+                self.throw_stone()
+            else:
+                pass
+        else:
+            if down:
+                if grounded: self.Breaker()
+                else:        pass
+            elif up:
+                self.Volley()
+            elif side:
+                self.Blast()
+            else:
+                # Neutral light: riposte if someone nearby was just parried, otherwise a normal attack
+                if not self.try_riposte(targets):
+                    self.Punch()
+
+    #---------------- HEAVY ----------------
+
+    def blast_bouncer(self):
+        self.start_attack(BlastBouncer(self))
 
     def rifle_shot(self):
-        self.start_attack(Attack(self, width=1000, height=10, offset=(500, 0),startup=15, active=15, recovery=30,damage=8, knockbackx=10, knockbacky=5, angle=5,stun=5))
+        self.start_attack(Attack(self, width=1000, height=10, offset=(500, -5), startup=14, active=4, recovery=10,damage=10, knockbackx=13, knockbacky=3, angle=10, stun=14))
+        self.special_ammo -= 1
 
-    def shotgun_blast(self):
-        self.start_attack(Attack(self, width=50, height=100, offset=(50, 0),startup=5, active=5, recovery=10,damage=15, knockbackx=3, knockbacky=3, angle=5,stun=7))
+    def throw_stone(self):
+        # Inverse knockback: victims are dragged TOWARDS Rend instead of away
+        def fire(owner):
+            stone = Hitbox(owner, 14, 14, (0, 0), damage=3, kbx=6, kby=4, angle=15, stun=8, mode="pull")
+            Projectile(owner.x + 20 * owner.facing, owner.y, owner.facing, speed=12, lifetime=45, hitbox=stone)
+        # active=0 means the move itself never hits, it only spawns the stone
+        self.start_attack(Attack(self, 1, 1, (0, 0), startup=6, active=0, recovery=12,
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
+
+    #---------------- LIGHT ----------------
+
+    def Breaker(self):    # down + light (grounded): Close Range High Damage High Stun Attack
+        self.start_attack(Attack(self, width=20, height=20, offset=(25, -5), startup=8, active=4, recovery=17,
+                                 damage=20, knockbackx=2, knockbacky=6, angle=80, stun=40))
+
+    def Blast(self):  # side + light: Simple Sideways Hit, Fairly Verical
+        self.start_attack(Attack(self, width=45, height=60, offset=(30, 0), startup=3, active=4, recovery=8,
+                                 damage=5, knockbackx=11, knockbacky=7, angle=5, stun=10))
+
+    def Punch(self):   # neutral + light: Punch the enemy.
+        self.start_attack(Attack(self, width=60, height=40, offset=(40, 0), startup=3, active=4, recovery=2,
+                                 damage=3, knockbackx=9, knockbacky=9, angle=25, stun=10))
+
+    def Volley(self):   # up + light: upward blast, launches heavily upward
+        self.start_attack(Attack(self, width=70, height=65, offset=(0, -25), startup=4, active=4, recovery=9,
+                                 damage=5, knockbackx=5, knockbacky=11, angle=90, stun=12))
+
 
 #==========================================================
 # CHARACTER: REND - special moves (multi-stage, so they get their own classes)
@@ -627,7 +819,7 @@ class FrenzyDive(Move):
                 o.NoGravTimer = 0
                 self.end(recovery=10)
                 return
-            if o.coyote_time == 5 or self.fall_frames > 120:   # landed (or safety timeout)
+            if o.coyote_time == COYOTE_TIME or self.fall_frames > 120:   # landed (or safety timeout)
                 self.dive.set_active(False)
                 self.state, self.timer = "recovery", 12
 
@@ -647,7 +839,7 @@ class Pierce(Move):
             owner.x_velocity = 0
         else:
             self.state, self.timer = "startup", 10
-        self.hitbox = self.add_hitbox(Hitbox(owner, 100, 50, (35, 20), damage=10, kbx=10, kby=20, angle=60, stun=14))
+        self.hitbox = self.add_hitbox(Hitbox(owner, 100, 50, (35, 20), damage=10, kbx=10, kby=10, angle=60, stun=14))
 
     def update(self, targets):
         o = self.owner
@@ -655,16 +847,16 @@ class Pierce(Move):
         if self.state == "slam":
             self.fall_frames += 1
             o.y_velocity = 16
-            if o.coyote_time == 5 or self.fall_frames > 120:   # landed (or safety timeout)
+            if o.coyote_time == COYOTE_TIME or self.fall_frames > 120:   # landed (or safety timeout)
                 self.state, self.timer = "startup", 6
             return
 
         self.timer -= 1
         if self.state == "startup" and self.timer <= 0:
-            self.state, self.timer = "active", 10
+            self.state, self.timer = "active", 4
             self.hitbox.set_active(True)
         elif self.state == "active" and self.timer <= 0:
-            self.state, self.timer = "recovery", 30
+            self.state, self.timer = "recovery", 16
             self.hitbox.set_active(False)
         elif self.state == "recovery" and self.timer <= 0:
             self.end()
@@ -729,8 +921,8 @@ class Consume(Move):
 
 class Rend(Player):
 
-    def __init__(self, currentLevel, name, x=None, y=None, size=100, spawnIcon="p", controls=None):
-        super().__init__(currentLevel, name, x, y, size, spawnIcon, controls)
+    def __init__(self, currentLevel, name, x=None, y=None, size=100, spawnIcon="p", controls=None, pad=None):
+        super().__init__(currentLevel, name, x, y, size, spawnIcon, controls, pad)
         self.stored_charge = 0        # Consume charge waiting to be released (in frames)
 
     def reset_state(self):
@@ -746,7 +938,7 @@ class Rend(Player):
         if not (heavy or light):
             return
 
-        grounded = self.coyote_time == 5
+        grounded = self.coyote_time == COYOTE_TIME
         down = self.held("down")
         side = self.held("left") or self.held("right")
         up = self.held("up")
@@ -788,7 +980,7 @@ class Rend(Player):
     def throw_stone(self):
         # Inverse knockback: victims are dragged TOWARDS Rend instead of away
         def fire(owner):
-            stone = Hitbox(owner, 14, 14, (0, 0), damage=3, kbx=10, kby=4, angle=15, stun=8, mode="pull")
+            stone = Hitbox(owner, 14, 14, (0, 0), damage=3, kbx=6, kby=4, angle=15, stun=8, mode="pull")
             Projectile(owner.x + 20 * owner.facing, owner.y, owner.facing, speed=12, lifetime=45, hitbox=stone)
         # active=0 means the move itself never hits, it only spawns the stone
         self.start_attack(Attack(self, 1, 1, (0, 0), startup=6, active=0, recovery=12,
@@ -797,42 +989,97 @@ class Rend(Player):
     #---------------- LIGHT ----------------
 
     def jab(self):    # down + light (grounded): slow-ish, close range, launches almost straight up
-        self.start_attack(Attack(self, width=40, height=50, offset=(10, -5), startup=8, active=4, recovery=10,
-                                 damage=7, knockbackx=10, knockbacky=17, angle=80, stun=34))
+        self.start_attack(Attack(self, width=40, height=50, offset=(25, -5), startup=8, active=4, recovery=10,
+                                 damage=7, knockbackx=10, knockbacky=10, angle=80, stun=14))
 
     def slash(self):  # side + light: simple sideways hit, slightly up
-        self.start_attack(Attack(self, width=60, height=40, offset=(40, 0), startup=3, active=4, recovery=7,
-                                 damage=5, knockbackx=9, knockbacky=9, angle=25, stun=10))
+        self.start_attack(Attack(self, width=60, height=40, offset=(40, 0), startup=3, active=4, recovery=8,
+                                 damage=5, knockbackx=11, knockbacky=7, angle=25, stun=10))
 
     def stab(self):   # neutral + light: slash, but angled further up and +1 damage
         self.start_attack(Attack(self, width=60, height=40, offset=(40, 0), startup=3, active=4, recovery=2,
                                  damage=6, knockbackx=9, knockbacky=9, angle=55, stun=10))
 
     def poke(self):   # up + light: upward slash, launches upward
-        self.start_attack(Attack(self, width=45, height=100, offset=(0, -35), startup=4, active=4, recovery=9,
+        self.start_attack(Attack(self, width=45, height=70, offset=(15, -35), startup=4, active=4, recovery=9,
                                  damage=5, knockbackx=11, knockbacky=11, angle=90, stun=12))
 
     def pogo(self):   # down + light (aerial): downward slash that bounces Rend upward if it hits someone
         def bounce(owner):
             owner.y_velocity = -10
         self.start_attack(Attack(self, width=40, height=45, offset=(0, 28), startup=3, active=10, recovery=8,
-                                 damage=4, knockbackx=6, knockbacky=12, angle=-80, stun=10, on_connect=bounce))
+                                 damage=4, knockbackx=6, knockbacky=6, angle=-80, stun=10, on_connect=bounce))
+#All character list
+
+CHARACTERS = {
+    "Ven": Ven,
+    "Rend": Rend
+}
 
 #==========================================================
 # RESPAWNING + CAMERA
 #==========================================================
 
+
 def respawn(player):
+    # Added a fix cas particales wouldnt be visible if u died off the bottom
+    death_x = min(player.x, Stage.camera.x + Screen.width / 2)
+    death_y = min(player.y, Stage.camera.y + Screen.height / 2)
+
+    print(f"Death particles triggered at ({death_x}, {death_y})")
+
+    # Main Purple burst.
+    Particles.burst(
+        death_x, death_y,
+        count=70,
+        colour=(100, 50, 255),
+        speed=(3, 12),
+        life=(30, 60),
+        size=(3, 7),
+        gravity=0.15,
+        drag=0.98
+    )
+
+    # Bright Pink sparks.
+    Particles.burst(
+        death_x, death_y,
+        count=35,
+        colour=(255, 230, 230),
+        speed=(4, 10),
+        life=(20, 45),
+        size=(2, 5),
+        gravity=0.1,
+        drag=0.98
+    )
+
+    # Smaller Purple particles.
+    Particles.burst(
+        death_x, death_y,
+        count=20,
+        colour=(255, 0, 255),
+        speed=(2, 7),
+        life=(25, 50),
+        size=(2, 4),
+        gravity=0.2,
+        drag=0.97
+    )
+
+    Sound.play("Death Booble")
+    Sound.play("Death sfx")
+    # Respawn the player.
     px, py = level.find(player.spawnIcon)[0]
     print(f"Respawn at spawn '{player.spawnIcon}', damage was {player.health}")
+
     player.reset_state()
     player.go_to(px, py)
-    if player.health > 100:       #TODO: Death Code (same placeholder rule you had for the victim)
+
+    if player.health > 100:
         player.health = 0
 
 
+
 class CameraFocus:
-    """Stand-in 'sprite' for the camera to follow: it sits halfway between every player."""
+    #Camera in the middle of all players
     def __init__(self):
         self.x = 0
         self.y = 0
@@ -841,16 +1088,34 @@ class CameraFocus:
         self.x = sum(p.x for p in players) / len(players)
         self.y = sum(p.y for p in players) / len(players)
 
-
+#================================================================================================================================#
+#                                                           ACTUAL GAME                                                          #
+#================================================================================================================================#
 #SETUP
 load_level(1,allLevels,allLegends)
 
-player1 = Rend(level, "player", 0, 0, spawnIcon="p", controls=P1_CONTROLS)
-player2 = Rend(level, "player", 0, 0, spawnIcon="e", controls=P2_CONTROLS)
-player2.facing = -1
-#player2 = Dummy(level, "player", 0, 0, spawnIcon="e")    # swap this in if you want a punching bag instead
+# Character choices
+player1_character = "Ven"
+player2_character = "Rend"
 
-players = [player1, player2]            # add more players here, everything below loops over this list
+# Create players using their selected characters
+player1 = CHARACTERS[player1_character](
+    level, "player", 0, 0,
+    spawnIcon="1",
+    controls=P1_CONTROLS,
+    pad=0
+)
+
+player2 = CHARACTERS[player2_character](
+    level, "player", 0, 0,
+    spawnIcon="2",
+    controls=P2_CONTROLS,
+    pad=1
+)
+
+player2.facing = -1
+
+players = [player1, player2]
 
 def others(player):                     # everyone a player's attacks can hit
     return [p for p in players if p is not player]
@@ -868,7 +1133,7 @@ while Screen.running:
 
     for p in players:                   # everyone decides their attack first...
         p.attackChecks(others(p))
-    for p in players:                   # ...then every move advances, so same-frame trades are fair (looking at you tristan)
+    for p in players:                   # ...then every move advances, so its fair (looking at you tristan)
         p.update_attack(others(p))
 
     for proj in projectiles[:]:         # copy, since update() removes finished projectiles
@@ -877,7 +1142,6 @@ while Screen.running:
     for p in players:
         if level.touching(p, "Z"): #TODO: Death Code
             respawn(p)
-            p.health = 0
 
     focus.track(players)
     Screen.update()

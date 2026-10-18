@@ -1,7 +1,6 @@
 import os,math,random,time,pygame,sys,textwrap
 
-__all__ = ["random_number","random_float","Screen","color","colour","Keyboard","Mouse","Sprite","Stage","Sound","Zone","TileMap"]
-
+__all__ = ["random_number","random_float","Screen","color","colour","Keyboard","Mouse","Gamepad","Sprite","Stage","Sound","Zone","TileMap","Particles"]
 
 #All Of This Code is Based off of the pygame library!, You Can Read About it Here: https://www.pygame.org/docs/
 #Pygame allows python to draw to the screen, and read inputs!
@@ -24,6 +23,15 @@ _font = pygame.font.Font(None, 20)
 #General Other Constants
 _ROTATE_MODES = ("all", "flip", "none")
 _EDGE_MODES = ("free", "onscreen", "bounce")
+
+# ===== NEW: Controller Support =====
+#Pygame has a standardised controller system, which gives Xbox, PlayStation and Switch controllers ONE shared layout.
+#It is optional, so if this version of pygame doesnt have it, controllers are simply switched off (the keyboard still works!)
+try:
+    from pygame._sdl2 import controller as _controller
+    _controller.init()
+except Exception:
+    _controller = None
 
 #More Setup Can Be Found Later in the Script, But We Need to Intialise Pygame First, as a variety of Functions Depend On It!
 
@@ -75,6 +83,7 @@ class _Screen():
         self.fps = 30
         self.running = True
         self.background = "white"
+        self._freeze = 0                   # NEW: how many frames of hitstop are still waiting to be played
         self._screen_set()
 
     def _screen_set(self): # This is called internally, to apply your changes after you set them
@@ -97,16 +106,38 @@ class _Screen():
     def update(self):
         Keyboard._new_frame()
         Mouse._new_frame()
+        self._read_events()
+        Gamepad._poll()                    # NEW: controllers are read once per frame, just like the keyboard
+
+        self._show_frame(advance=True)
+
+        #NEW: Hitstop! If Screen.hitstop() was called during this frame, we hold the picture here for a few frames.
+        #Your game loop is stuck inside this function while we do, so EVERYTHING freezes without you changing any code.
+        while self._freeze > 0 and self.running:
+            self._freeze -= 1
+            self._read_events()            # still listen to the keyboard, WITHOUT clearing it, so a button pressed during the freeze still counts afterwards
+            self._show_frame(advance=False)
+
+    #Reads everything the window has told us since last time (key presses, clicks, the window being closed)
+    def _read_events(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
             Keyboard._handle(event)
             Mouse._handle(event)
 
-        Stage._draw_frame()          #Draw order -> camera, backdrop, tiles, sprites, then zones
+    #Draws one frame and waits for the next one. advance=False redraws the exact same picture (nothing moves)
+    def _show_frame(self, advance):
+        Stage._draw_frame(advance)          #Draw order -> camera, backdrop, tiles, sprites, particles, then zones
         pygame.display.flip()
         self.surface.fill(self.background)
         _clock.tick(self.fps)
+
+    #NEW: Freezes the whole game for a few frames. Great for making big hits feel heavy!
+    #Example: Screen.hitstop(6) freezes for 6 frames (a tenth of a second at 60 fps)
+    #The freeze happens at the next Screen.update(), and bigger numbers stack by taking the largest, not adding.
+    def hitstop(self, frames):
+        self._freeze = max(self._freeze, int(frames))
 
     #Using Pygame, We can Modify the Size of The Screen, to Enlarge it, and go beyond the typical size!
     def size(self,width,height): # Simply input your desired width and height in pixels!
@@ -567,16 +598,20 @@ class _Stage:
             ox, oy = self._offset()
             Screen.surface.blit(self._backdrop, (-ox, -oy))
 
-    def _draw_frame(self):
-        for sprite in self._sprites:
-            sprite._apply_edge_mode()
-            sprite._apply_limits()
-        self.camera._update()          # after sprites are limited, so it follows where they really are
+    #advance=False (used by hitstop) draws the picture WITHOUT moving anything: sprites, camera and particles all stay frozen
+    def _draw_frame(self, advance=True):
+        if advance:
+            for sprite in self._sprites:
+                sprite._apply_edge_mode()
+                sprite._apply_limits()
+            self.camera._update()          # after sprites are limited, so it follows where they really are
+            Particles._update()            # NEW: particles move once per real frame
         self._draw_backdrop()
         for tilemap in self._tilemaps:
             tilemap._draw()
         for sprite in self._sprites:
             sprite._draw()
+        Particles._draw()                  # NEW: on top of sprites, underneath debug zones
         for zone in self._zones:
             zone._draw()
 
@@ -719,6 +754,92 @@ class TileMap:
                     Screen.surface.blit(image, (col * ts - ox, row * ts - oy))
 
 
+# ======PARTICLES=======
+
+#Particles are tiny, short-lived dots. Perfect for blood, sparks, dust, smoke, explosions, confetti...
+#You never have to move or draw them, the Stage does it for you!
+#
+#    Particles.burst(x, y)                                   -> a puff of 12 red dots going every direction
+#    Particles.burst(x, y, count=30, colour="orange")        -> a bigger orange one
+#    Particles.burst(x, y, direction=90, spread=40)          -> a spray going RIGHT, within 40 degrees of it
+#
+#direction uses the same angles as a Sprite: 0 = up, 90 = right, 180 = down, 270 = left. Leave it out to go every way.
+#spread is how wide the spray is, in degrees (only matters when you set a direction).
+#speed, life and size can each be one number, or a (min, max) pair so every particle is a little different.
+#colour can be one colour, or a LIST of colours that each particle picks from, e.g. ["darkred", (200, 0, 0)]
+#life is in frames, size is the starting radius in pixels (particles shrink as they age)
+#gravity pulls them down each frame, and drag slows them (1 = never slows, 0.9 = slows very fast)
+#fixed=True sticks them to the screen instead of the world, ignoring the camera
+class _Particle:
+    __slots__ = ("x", "y", "vx", "vy", "life", "max_life", "size", "colour", "gravity", "drag", "fixed")
+
+class _Particles:
+    def __init__(self):
+        self._list = []
+        self.max = 600                      # safety cap, so spamming bursts can never slow the game to a crawl
+
+    @property
+    def count(self):                        # how many particles are alive right now
+        return len(self._list)
+
+    def burst(self, x, y, count=12, colour="red", direction=None, spread=360, speed=(2, 6),life=(20, 40), size=(2, 4), gravity=0.2, drag=0.98, fixed=False):
+        palette = self._palette(colour)
+        speed, life, size = _span(speed), _span(life), _span(size)
+        for _ in range(int(count)):
+            if len(self._list) >= self.max:
+                self._list.pop(0)           # recycle the oldest one instead of refusing the new one
+            p = _Particle()
+            angle = random.uniform(0, 360) if direction is None else direction + random.uniform(-spread / 2, spread / 2)
+            rad = math.radians(angle)
+            s = random.uniform(*speed)
+            p.x, p.y = x, y
+            p.vx = s * math.sin(rad)
+            p.vy = -s * math.cos(rad)       # minus, because pygame's y points down (same as Sprite.move)
+            p.max_life = p.life = max(1, int(random.uniform(*life)))
+            p.size = random.uniform(*size)
+            p.colour = random.choice(palette)
+            p.gravity, p.drag, p.fixed = gravity, drag, fixed
+            self._list.append(p)
+
+    #Removes every particle straight away (handy when you change level)
+    def clear(self):
+        self._list.clear()
+
+    def _palette(self, colour):
+        #One colour like (255,0,0) or "red" -> a list of one. A list OF colours -> each one converted.
+        if isinstance(colour, (list, tuple)) and colour and not isinstance(colour[0], (int, float)):
+            return [color(c) for c in colour]
+        return [color(colour)]
+
+    def _update(self):
+        alive = []
+        for p in self._list:
+            p.vy += p.gravity
+            p.vx *= p.drag
+            p.vy *= p.drag
+            p.x += p.vx
+            p.y += p.vy
+            p.life -= 1
+            if p.life > 0:
+                alive.append(p)
+        self._list = alive
+
+    def _draw(self):
+        if not self._list:
+            return
+        ox, oy = Stage._offset()
+        for p in self._list:
+            radius = max(1, round(p.size * p.life / p.max_life))    # shrinks to nothing as it ages
+            px, py = (p.x, p.y) if p.fixed else (p.x - ox, p.y - oy)
+            pygame.draw.circle(Screen.surface, p.colour, (round(px), round(py)), radius)
+
+#A single number becomes a (min, max) pair that doesnt vary
+def _span(value):
+    if isinstance(value, (int, float)):
+        return (value, value)
+    return (min(value), max(value))
+
+
 # ===== INPUT =====
 
 #We Can Use Pygame To Detect What Keys are Being Pressed!
@@ -835,6 +956,105 @@ class _Mouse():
                 self._right_clicked = True
 
 
+# ======GAMEPAD======
+
+#Controllers work just like the Keyboard, except every function also needs to know WHICH controller you mean.
+#Slot 0 is the first controller plugged in, slot 1 is the second, and so on. Plugging in and unplugging mid-game is fine!
+#
+#    Gamepad.held(0, "a")              -> is the first controller's A button down right now?
+#    Gamepad.pressed(0, "a")           -> was it pressed THIS frame (just once, not while held)?
+#    Gamepad.released(0, "a")          -> was it let go of this frame?
+#    Gamepad.held(0, ("a", "b"))       -> a tuple means "any of these"
+#    Gamepad.axis(0, "left_x")         -> how far the left stick is pushed sideways, from -1.0 to 1.0
+#    Gamepad.count                     -> how many controllers are connected
+#
+#Buttons are named by their POSITION, so it works the same on Xbox, PlayStation and Switch controllers:
+#    "a" "b" "x" "y"   the four face buttons (a = bottom, b = right, x = left, y = top. On PlayStation: Cross, Circle, Square, Triangle)
+#    "lb" "rb"         the shoulder buttons          "lt" "rt"      the triggers (count as pressed once pulled half way)
+#    "start" "back"    the menu buttons              "l3" "r3"      pressing the sticks in
+#    "left" "right" "up" "down"                      the left stick OR the d-pad, whichever you use
+#
+#Axis names are "left_x" "left_y" "right_x" "right_y" "lt" "rt". Sticks read 0 inside the deadzone. Up is NEGATIVE, like pygame's y.
+#You can change Gamepad.deadzone (how far a stick must be pushed to count, default 0.5) and Gamepad.trigger (default 0.5)
+class _Gamepad:
+    _BUTTONS = {"a": "A", "b": "B", "x": "X", "y": "Y", "back": "BACK", "start": "START","l3": "LEFTSTICK", "r3": "RIGHTSTICK", "lb": "LEFTSHOULDER", "rb": "RIGHTSHOULDER"}
+    _AXES = {"left_x": "LEFTX", "left_y": "LEFTY", "right_x": "RIGHTX", "right_y": "RIGHTY","lt": "TRIGGERLEFT", "rt": "TRIGGERRIGHT"}
+    _NAMES = tuple(_BUTTONS) + ("left", "right", "up", "down", "lt", "rt")
+
+    def __init__(self):
+        self.deadzone = 0.5
+        self.trigger = 0.5
+        self.enabled = _controller is not None
+        self._pads = []                    # the connected controllers, in slot order
+        self._count = -1                   # how many devices there were last time we looked (to spot plugging in/out)
+        self._now = []                     # for each slot, the set of inputs that are active this frame
+        self._prev = []                    # ...and last frame, which is how pressed() knows the difference between "held" and "just pressed"
+
+    @property
+    def count(self):
+        return len(self._pads)
+
+    def held(self, slot, names):
+        return self._active(self._now, slot, names)
+
+    def pressed(self, slot, names):
+        return self._active(self._now, slot, names) and not self._active(self._prev, slot, names)
+
+    def released(self, slot, names):
+        return self._active(self._prev, slot, names) and not self._active(self._now, slot, names)
+
+    def axis(self, slot, name):
+        if name not in self._AXES:
+            raise ValueError(f"Error!: '{name}' is not a controller axis. Choose from: {', '.join(self._AXES)}")
+        if not 0 <= slot < len(self._pads):
+            return 0.0
+        value = self._pads[slot].get_axis(getattr(pygame, "CONTROLLER_AXIS_" + self._AXES[name])) / 32768
+        if name in ("lt", "rt"):
+            return value
+        return value if abs(value) >= self.deadzone else 0.0
+
+    #Is ANY of these inputs active in this snapshot? A missing controller just counts as "nothing pressed" (so you dont keep pressing inputs when controllers are disconnected)
+    def _active(self, state, slot, names):
+        if isinstance(names, str):
+            names = (names,)
+        for n in names:
+            if n not in self._NAMES:
+                raise ValueError(f"Error!: '{n}' is not a controller input. Choose from: {', '.join(self._NAMES)}")
+        return 0 <= slot < len(state) and any(n in state[slot] for n in names)
+
+    #Called for you inside Screen.update(), once per frame
+    def _poll(self):
+        if not self.enabled:
+            return
+        count = _controller.get_count()
+        if count != self._count:                 # something was plugged in or unplugged, so look for controllers again
+            self._count = count
+            for pad in self._pads:
+                pad.quit()
+            self._pads = [_controller.Controller(i) for i in range(count) if _controller.is_controller(i)]
+        self._prev = self._now
+        self._now = [self._read(pad) for pad in self._pads]
+
+    #Works out everything one controller is doing right now, as a set of names
+    def _read(self, pad):
+        on = set()
+        for name, suffix in self._BUTTONS.items():
+            if pad.get_button(getattr(pygame, "CONTROLLER_BUTTON_" + suffix)):
+                on.add(name)
+
+        lx = pad.get_axis(pygame.CONTROLLER_AXIS_LEFTX) / 32768
+        ly = pad.get_axis(pygame.CONTROLLER_AXIS_LEFTY) / 32768       # stick up is negative
+        dpad = lambda d: pad.get_button(getattr(pygame, "CONTROLLER_BUTTON_DPAD_" + d)) #|IDEK what this does i just stole it from the docs
+        if lx < -self.deadzone or dpad("LEFT"):  on.add("left")
+        if lx > self.deadzone or dpad("RIGHT"):  on.add("right")
+        if ly < -self.deadzone or dpad("UP"):    on.add("up")
+        if ly > self.deadzone or dpad("DOWN"):   on.add("down")
+
+        if pad.get_axis(pygame.CONTROLLER_AXIS_TRIGGERLEFT) / 32768 > self.trigger:  on.add("lt") #Dont ask why 32768 is the magic numbers, trust the docs
+        if pad.get_axis(pygame.CONTROLLER_AXIS_TRIGGERRIGHT) / 32768 > self.trigger: on.add("rt")
+        return on
+
+
 # ======SOUND======
 class _Sound:
     def __init__(self):
@@ -915,7 +1135,9 @@ def random_float():
 
 #There are a Few Final Things to Setup, Which we do at The End of This Script.
 Screen = _Screen() # This Creates a New Screen, called "Screen". We call this Instantiating, Which is Creating a new Object out of a Class!
-Keyboard = _Keyboard() # This Allows You To Uses Keyboard to Detect Keyboard input!
-Mouse = _Mouse()
-Stage = _Stage()
-Sound = _Sound()
+Keyboard = _Keyboard() # This Allows You To Use Keyboard to Detect Keyboard input!
+Mouse = _Mouse() #This allows You to Use Mouse input
+Gamepad = _Gamepad() #THis allows you to use controller input
+Stage = _Stage() #Sets up the stage
+Particles = _Particles() #Sets up the particle system
+Sound = _Sound() #Sets up the audio system
