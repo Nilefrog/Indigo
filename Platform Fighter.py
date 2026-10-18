@@ -615,6 +615,8 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
     def on_parry_success(self):
         """You parried something: skip the rest of the parry's endlag so you can punish straight away."""
         self.actionableTimer = 0
+        self.dash_charges = self.max_dash_charges
+        self.jump_charges = self.max_jump_charges
         self.NoGravTimer = 0
         print("Parried!")
 
@@ -1103,14 +1105,14 @@ player1 = CHARACTERS[player1_character](
     level, "player", 0, 0,
     spawnIcon="1",
     controls=P1_CONTROLS,
-    pad=0
+    pad=1
 )
 
 player2 = CHARACTERS[player2_character](
     level, "player", 0, 0,
     spawnIcon="2",
     controls=P2_CONTROLS,
-    pad=1
+    pad=0
 )
 
 player2.facing = -1
