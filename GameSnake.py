@@ -1,6 +1,6 @@
 import os,math,random,time,pygame,sys,textwrap
 
-__all__ = ["random_number","random_float","Screen","color","colour","Keyboard","Mouse","Gamepad","Sprite","Stage","Sound","Zone","TileMap","Particles"]
+__all__ = ["random_number","random_float","Screen","color","colour","Keyboard","Mouse","Gamepad","Sprite","Stage","Sound","Zone","TileMap","Particles","Text","Box"]
 
 #All Of This Code is Based off of the pygame library!, You Can Read About it Here: https://www.pygame.org/docs/
 #Pygame allows python to draw to the screen, and read inputs!
@@ -166,6 +166,7 @@ class _Screen():
 #Tiles (for TileMap) go in a folder called "tiles"
 _IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".gif", ".bmp")
 _SOUND_TYPES = (".wav", ".ogg", ".mp3")
+_FONT_TYPES = (".ttf", ".otf")
 
 def _find_project_folder():
     main = sys.modules.get("__main__")
@@ -225,7 +226,7 @@ def _find_sound(name):
 
 class Sprite:
     def __init__(self, name, x=None, y=None, size=100):
-        self._costumes = _load_images("sprites", name)
+        self._costumes = self._load_costumes(name)
         self.name = name                   # Current Sprite Name
         self.costume = 0                   # The Current Costume
         self.x = Screen.width / 2 if x is None else x    # Sprite Centre
@@ -242,6 +243,11 @@ class Sprite:
         self._y_limits = None
         self._zone = None                  # a Zone the sprite is locked inside
         Stage._sprites.append(self)        # the Stage will now draw it for us
+
+    #Where a sprite's costumes come from. A normal Sprite loads pictures from the "sprites" folder.
+    #Text and Box override this, so they can draw their own picture instead!
+    def _load_costumes(self, name):
+        return _load_images("sprites", name)
 
     #rotate_mpde lets you alter whether the sprite flips or rotates freely, or doesnt rotate at all
     @property
@@ -385,6 +391,11 @@ class Sprite:
     #To Create Copies of a Sprite, use (newspritename) = (sprite name).clone()
     def clone(self):
         twin = Sprite(self.name, self.x, self.y, self.size)
+        self._copy_settings(twin)
+        return twin
+
+    #Copies everything about how this sprite behaves onto another one (clone uses it, and so do Text and Box)
+    def _copy_settings(self, twin):
         twin.costume = self.costume
         twin.direction = self.direction
         twin.visible = self.visible
@@ -396,7 +407,6 @@ class Sprite:
         twin._x_limits = self._x_limits
         twin._y_limits = self._y_limits
         twin._zone = self._zone
-        return twin
 
     # --- internal ---
 
@@ -487,6 +497,195 @@ class Sprite:
                 pygame.draw.rect(Screen.surface, (255, 0, 0), self._hitbox_rect().move(-ox, -oy), 1)
 
 
+# ======TEXT AND BOX======
+
+#Normal Sprites load their picture from the "sprites" folder.
+#A _Drawn sprite makes its OWN picture using code instead, and redraws it whenever you change one of its settings.
+#Text and Box are both _Drawn, which means they are ALSO Sprites, so everything a Sprite can do works on them for free:
+#go_to, move, show, hide, clone, size, direction, touching, touching_mouse, clamp_x, delete...
+#Sprites are drawn in the order they were made, so a Box made BEFORE some Text will sit behind it!
+class _Drawn(Sprite):
+    _LOOKS = ()          # the settings that change the picture. Changing any of them makes it redraw
+    _COLOURS = ()        # the settings that hold a colour, so you can write colour="red" or colour=(255, 0, 0)
+    _STRINGS = ()        # the settings that must always be text
+
+    def __init__(self, kind, x, y, fixed):
+        super().__init__(kind, x, y, 100)
+        self.fixed = fixed                 # True = stuck to the screen (menus, scores). False = lives in the world, so the camera moves it
+
+    def __setattr__(self, name, value):
+        if name in self._COLOURS:
+            value = color(value)
+        elif name in self._STRINGS:
+            value = str(value)
+        if name in self._LOOKS and getattr(self, name, None) != value:
+            object.__setattr__(self, "_dirty", True)
+        object.__setattr__(self, name, value)
+
+    def _load_costumes(self, name):
+        self._dirty = False
+        return self._render()
+
+    def _image(self):
+        if self._dirty:
+            self._dirty = False
+            self._costumes = self._render()
+        return super()._image()
+
+
+#Fonts are slow to make, so we only make each one once
+_font_cache = {}
+
+def _get_font(name, size, bold, italic):
+    key = (name, size, bold, italic)
+    if key not in _font_cache:
+        font = None
+        if name is not None:               # first look in a folder called "fonts" next to your script, then at the fonts installed on the computer
+            for ext in _FONT_TYPES:
+                path = os.path.join(_project_dir, "fonts", name + ext)
+                if os.path.isfile(path):
+                    font = pygame.font.Font(path, size)
+                    break
+            if font is None:
+                font = pygame.font.SysFont(name, size)
+        else:
+            font = pygame.font.Font(None, size)
+        font.set_bold(bold)
+        font.set_italic(italic)
+        _font_cache[key] = font
+    return _font_cache[key]
+
+#Splits text into lines no wider than width pixels (and keeps any \n you wrote yourself)
+def _wrap_lines(text, font, width):
+    lines = []
+    for paragraph in text.split("\n"):
+        line = ""
+        for word in paragraph.split(" "):
+            trial = word if not line else line + " " + word
+            if line and font.size(trial)[0] > width:
+                lines.append(line)
+                line = word
+            else:
+                line = trial
+        lines.append(line)
+    return lines
+
+
+#Text is a Sprite that draws WORDS instead of a picture. Perfect for menus, scores and name tags!
+#
+#    score = Text("Score: 0", 100, 30)               -> x,y is the CENTRE of the words, like every other sprite
+#    score.text = "Score: 10"                        -> change any setting below and it redraws itself for you
+#    title = Text("My Game", font_size=72, colour="gold", outline=4)
+#    note = Text("Long words wrap to fit 300 pixels", wrap=300, align="left")
+#    tag = Text("P1", fixed=False)                   -> lives in the world, so the camera moves it (name tags above heads!)
+#
+#font_size is in pixels. Leave font out for the built in font, or use the name of a file in a folder called "fonts" (without the .ttf),
+#or the name of a font installed on the computer, like font="arial". outline is how thick the outline is, 0 = none.
+#align ("left", "center" or "right") only matters when there is more than one line (you used \n, or wrap).
+#fixed is True by default, so the words stay stuck to the screen. text.width and text.height tell you how big the words are.
+class Text(_Drawn):
+    _LOOKS = ("text", "font_size", "colour", "font", "bold", "italic", "outline", "outline_colour", "align", "wrap")
+    _COLOURS = ("colour", "outline_colour")
+    _STRINGS = ("text",)
+
+    def __init__(self, text="", x=None, y=None, font_size=32, colour="black", font=None, bold=False, italic=False,
+                 outline=0, outline_colour="black", align="center", wrap=None, fixed=True):
+        self.text, self.font_size, self.colour = text, font_size, colour
+        self.font, self.bold, self.italic = font, bold, italic
+        self.outline, self.outline_colour = outline, outline_colour
+        self.align, self.wrap = align, wrap
+        super().__init__("text", x, y, fixed)
+
+    @property
+    def color(self):                       # for the Americans
+        return self.colour
+
+    @color.setter
+    def color(self, value):
+        self.colour = value
+
+    @property
+    def width(self):
+        return self._image().get_width()
+
+    @property
+    def height(self):
+        return self._image().get_height()
+
+    def clone(self):
+        twin = Text(self.text, self.x, self.y, self.font_size, self.colour, self.font, self.bold, self.italic,
+                    self.outline, self.outline_colour, self.align, self.wrap, self.fixed)
+        self._copy_settings(twin)
+        return twin
+
+    def _render(self):
+        font = _get_font(self.font, max(1, int(self.font_size)), self.bold, self.italic)
+        lines = _wrap_lines(self.text, font, self.wrap) if self.wrap else self.text.split("\n")
+        pad = int(self.outline)
+        line_height = font.get_linesize()
+        faces = [font.render(line or " ", True, self.colour) for line in lines]    # (an empty line still needs a height)
+        width = max(face.get_width() for face in faces) + 2 * pad
+        image = pygame.Surface((max(1, width), max(1, line_height * len(faces) + 2 * pad)), pygame.SRCALPHA)
+        for i, face in enumerate(faces):
+            if self.align == "left":
+                x = pad
+            elif self.align == "right":
+                x = width - pad - face.get_width()
+            else:
+                x = (width - face.get_width()) // 2
+            y = pad + i * line_height
+            if pad > 0:                    # the outline is just the words drawn in the outline colour, shifted all around the real ones
+                edge = font.render(lines[i] or " ", True, self.outline_colour)
+                for dx in range(-pad, pad + 1):
+                    for dy in range(-pad, pad + 1):
+                        if dx or dy:
+                            image.blit(edge, (x + dx, y + dy))
+            image.blit(face, (x, y))
+        return [("text", image)]
+
+
+#Box is a Sprite that draws a coloured rectangle. Use it for panels, buttons, highlights, health bars, or a see-through black Box over
+#everything to dim the screen. Make it BEFORE the Text you want sitting on top of it.
+#
+#    panel = Box(300, 80, "navy", 240, 100)
+#    panel.alpha = 128                      -> 0 = invisible, 255 = solid
+#    button = Box(200, 50, "green", border=3, border_colour="white", radius=10)    -> a rounded button with an outline
+#    if button.touching_mouse() and Mouse.clicked: ...
+#
+#Changing width, height, colour, alpha, border, border_colour or radius redraws it. Like Text, it is fixed to the screen by default.
+class Box(_Drawn):
+    _LOOKS = ("width", "height", "colour", "alpha", "border", "border_colour", "radius")
+    _COLOURS = ("colour", "border_colour")
+
+    def __init__(self, width, height, colour="white", x=None, y=None, alpha=255, border=0, border_colour="white", radius=0, fixed=True):
+        self.width, self.height, self.colour = width, height, colour
+        self.alpha, self.border, self.border_colour, self.radius = alpha, border, border_colour, radius
+        super().__init__("box", x, y, fixed)
+
+    @property
+    def color(self):
+        return self.colour
+
+    @color.setter
+    def color(self, value):
+        self.colour = value
+
+    def clone(self):
+        twin = Box(self.width, self.height, self.colour, self.x, self.y, self.alpha, self.border, self.border_colour, self.radius, self.fixed)
+        self._copy_settings(twin)
+        return twin
+
+    def _render(self):
+        image = pygame.Surface((max(1, int(self.width)), max(1, int(self.height))), pygame.SRCALPHA)
+        rect = image.get_rect()
+        if self.alpha > 0:
+            r, g, b = tuple(self.colour)[:3]
+            pygame.draw.rect(image, (r, g, b, max(0, min(255, int(self.alpha)))), rect, border_radius=int(self.radius))
+        if self.border > 0:
+            pygame.draw.rect(image, self.border_colour, rect, int(self.border), border_radius=int(self.radius))
+        return [("box", image)]
+
+
 # ======CAMERA======
 
 #The camera is the point in the world that sits in the middle of the screen.
@@ -523,6 +722,14 @@ class _Camera:
 
     def stop_following(self):
         self.target = None
+
+    #Puts the camera back exactly how it started: centred on the screen, following nothing, with no limits. Great after a level ends!
+    def reset(self):
+        self._x = None
+        self._y = None
+        self.target = None
+        self.smooth = 0
+        self._zone = None
 
     #The camera will never show anything outside the zone (the screen edge stays inside it)
     def limit_to(self, zone):
@@ -861,6 +1068,10 @@ class _Keyboard:
     def pressed(self, key):
         return _key_code(key) in self._pressed
 
+    #Returns the NAMES of every key pressed last frame, e.g. ["space", "left shift"]. Handy for "press any key" screens
+    def pressed_keys(self):
+        return [pygame.key.name(code) for code in self._pressed]
+
     #This Function Simply Checks If A Key Was Released Last Frame
 
     def released(self, key):
@@ -1002,6 +1213,18 @@ class _Gamepad:
 
     def released(self, slot, names):
         return self._active(self._prev, slot, names) and not self._active(self._now, slot, names)
+
+    #Returns the name of an input that was pressed THIS frame, or None if nothing was. Leave slot out to listen to every controller.
+    #Handy for "press a button to rebind" screens:  name = Gamepad.any_pressed()
+    def any_pressed(self, slot=None):
+        slots = range(len(self._now)) if slot is None else [slot]
+        for s in slots:
+            if 0 <= s < len(self._now):
+                before = self._prev[s] if s < len(self._prev) else set()
+                fresh = self._now[s] - before
+                if fresh:
+                    return min(fresh, key=self._NAMES.index)      # buttons come first in the list, so they win over a drifting stick
+        return None
 
     def axis(self, slot, name):
         if name not in self._AXES:
