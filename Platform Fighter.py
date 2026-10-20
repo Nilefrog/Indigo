@@ -200,8 +200,8 @@ class Hitbox: # Damaging Hitboxes
         scale = (target.health / 200) + 1
         a = math.radians(self.angle)
         if not self.projectile:
-            self.owner.dash_charges = 1
-            self.owner.jump_charges = 1
+            self.owner.dash_charges = max(self.owner.dash_charges, 1)       # (max, so a character with 2 dashes keeps them)
+            self.owner.jump_charges = max(self.owner.jump_charges, 1)
 
         if self.mode == "radial":
             dx = target.x - self.zone.x
@@ -325,6 +325,13 @@ class Attack(Move):
 
 
 projectiles = []
+
+# Areas where gravity is different (Angellica's gravity zone). Each one has .scale and .contains(player).
+gravity_fields = []
+
+def gravity_scale(player):
+    """How strongly gravity pulls this player right now (1 = normal). Overlapping fields don't stack: the weakest one wins."""
+    return min([f.scale for f in gravity_fields if f.contains(player)], default=1)
 
 class Projectile: #Player Attack Projectiles
     def __init__(self, x, y, facing, speed, lifetime, hitbox, pierce=False, angle=0, gravity=0, ignore_tiles=False):
@@ -468,7 +475,7 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
             self.actionable = False 
 
         if self.NoGravTimer == 0: #account for gravity
-            self.y_velocity += self.gravity
+            self.y_velocity += self.gravity * gravity_scale(self)
         if self.pressed("jump"):
                 self.jump_buffer = 5   
 
@@ -665,6 +672,14 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
 
     def on_dealt_hit(self, damage, target):
         """You landed a hit (not a parried one). Characters override this."""
+        pass
+
+    def should_die(self):
+        """Return True to be sent back to the spawn point this frame (Bombhead's fuse running out). Characters override this."""
+        return False
+
+    def on_enemy_death(self, dead):
+        """Another player just died / respawned. Characters override this (Bombhead's fuse refills)."""
         pass
 
     def on_parry_success(self):
@@ -2042,13 +2057,1083 @@ class CaptnRex(Player):
         self.start_attack(Attack(self, width=46, height=54, offset=(8, 34), startup=5, active=6, recovery=9,
                                  damage=6, knockbackx=5, knockbacky=9, angle=-70, stun=12))
 
+#==========================================================
+# CHARACTER: BOMBHEAD - explosions, bombs and special moves
+#   Blast      - one explosion: a hitbox that lives for a few frames, plus a see-through fireball so you can see its size
+#   Explosive  - base for anything Bombhead throws that goes bang on contact (Bomb, Shell, DroppedBomb)
+#   Everything Bombhead makes lives in his `effects` list, which he updates every frame (like Cap'n Rex's ships).
+#==========================================================
+
+class Blast:
+    """An explosion. Hits everyone except its owner. mode="radial" throws victims away from the centre,
+    mode="angle" throws them the way `facing` points (used by the shell, which is a directional shot).
+    A parry blocks it for the parrier, but doesn't stun Bombhead or send it back."""
+    def __init__(self, owner, x, y, size, damage, kbx, kby, stun, mode="radial", angle=45, facing=1, life=5):
+        self.owner, self.x, self.y, self.facing = owner, x, y, facing
+        self.life = self.max_life = life
+        self.done = False
+        self.hitbox = Hitbox(owner, size, size, (0, 0), damage=damage, kbx=kbx, kby=kby, angle=angle, stun=stun, mode=mode)
+        self.hitbox.projectile = _NoReflect()
+        self.hitbox.set_active(True)
+        self.vis = Box(size, size, (255, 160, 50), x, y, alpha=150, radius=size / 2, fixed=False)
+        Particles.burst(x, y, count=int(size / 4) + 10, colour=[(255, 210, 70), (255, 130, 30), (110, 110, 110)],
+                        speed=(2, 3 + size / 40), life=(12, 28), size=(3, 7), gravity=0.05, drag=0.95)
+        Sound.play("BlastBounceFire")
+
+    def update(self, targets):
+        victims = [p for p in players if p is not self.owner]      # ignores `targets`: a parried bomb changes owner
+        self.hitbox.place(self.x, self.y, self.facing)
+        self.hitbox.check(victims, self.facing)
+        self.life -= 1
+        self.vis.alpha = max(0, 150 * self.life / self.max_life)
+        if self.life <= 0:
+            self.delete()
+
+    def delete(self):
+        if not self.done:
+            self.done = True
+            self.hitbox.delete()
+            self.vis.delete()
+
+
+class Explosive:
+    """A bomb-like object. Subclasses fill in step() (movement) and explode() (what the bang is).
+    `home` is the Bombhead who made it (it lives in his effects list), `owner` is whoever it currently hurts people FOR,
+    which only changes if someone parries it."""
+    MAX_AGE = 600
+
+    def __init__(self, owner, x, y, size, colour, border_colour="black"):
+        self.home = self.owner = owner
+        self.x, self.y, self.size = x, y, size
+        self.vx = self.vy = 0
+        self.age = 0
+        self.done = False
+        self.box = Box(size, size, colour, x, y, border=3, border_colour=border_colour, radius=size / 2, fixed=False)
+        self.zone = Zone(x, y, size + 4, size + 4)
+
+    def step(self):
+        pass
+
+    def explode(self):
+        pass
+
+    def detonate(self):
+        self.explode()
+        self.delete()
+
+    def fizzle(self):
+        Particles.burst(self.x, self.y, count=6, colour=[(120, 120, 120), (200, 200, 200)], speed=(1, 3), life=(8, 16), size=(2, 3), gravity=-0.05)
+        self.delete()
+
+    def reflect(self, parrier):
+        """Parried: it now belongs to the parrier and heads back the way it came."""
+        self.owner = parrier
+        self.vx = -self.vx
+        self.vy = min(self.vy, 0) - 2
+        Particles.burst(self.x, self.y, count=30, colour=(100, 50, 255), speed=(4, 9), life=(20, 40), size=(3, 6), gravity=0, drag=0.98)
+
+    def update(self, targets):
+        self.age += 1
+        self.step()
+        if self.done:
+            return
+        if self.age > self.MAX_AGE:
+            self.fizzle()
+            return
+        self.box.go_to(self.x, self.y)
+        self.zone.x, self.zone.y = self.x, self.y
+        for t in [p for p in players if p is not self.owner]:
+            if t.touching_zone(self.zone):
+                if t.parrying:
+                    self.reflect(t)
+                    t.on_parry_success()
+                else:
+                    self.detonate()
+                return
+
+    def delete(self):
+        if not self.done:
+            self.done = True
+            self.box.delete()
+            self.zone.delete()
+
+
+class Bomb(Explosive):
+    """The thrown bomb: arcs, bounces ONCE, and goes off on the second bounce (floor or wall) or on touching an enemy."""
+    def __init__(self, owner, x, y, direction):
+        super().__init__(owner, x, y, 16, (45, 45, 55), border_colour=(255, 120, 30))
+        self.vx, self.vy = 7 * direction, -4
+        self.bounces = 0
+
+    def bounce(self):
+        self.bounces += 1
+        if self.bounces >= 2:
+            self.detonate()
+
+    def step(self):
+        half = self.size / 2
+        self.vy = min(self.vy + 0.4, 14)
+        nx = self.x + self.vx
+        if level.is_solid(nx + math.copysign(half, self.vx), self.y):
+            self.vx = -self.vx * 0.5                       # bounced off a wall (counts as a bounce)
+            self.bounce()
+            if self.done:
+                return
+        else:
+            self.x = nx
+        ny = self.y + self.vy
+        if self.vy > 0 and level.is_solid(self.x, ny + half):
+            self.vy = -max(5, self.vy * 0.55)              # bounced off the floor
+            self.bounce()
+        elif self.vy < 0 and level.is_solid(self.x, ny - half):
+            self.vy = 0                                    # bonked its head: just stops rising
+        else:
+            self.y = ny
+
+    def explode(self):
+        # a fairly minor explosion (the centre sits a little low so victims are popped upward)
+        self.home.effects.append(Blast(self.owner, self.x, self.y + 8, 90, damage=6, kbx=8, kby=9, stun=12))
+
+
+class Shell(Explosive):
+    """The heavy side shot: really slow, flies straight, ONLY explodes on a person (walls and the floor just stop it)."""
+    def __init__(self, owner, x, y, direction):
+        super().__init__(owner, x, y, 24, (255, 120, 30), border_colour=(60, 20, 0))
+        self.vx = 3.2 * direction
+        self.MAX_AGE = 240
+
+    def step(self):
+        self.x += self.vx
+        if level.is_solid(self.x, self.y):
+            self.fizzle()
+        elif self.age % 4 == 0:
+            Particles.burst(self.x - 8 * math.copysign(1, self.vx), self.y, count=1, colour=[(255, 200, 60), (160, 160, 160)],
+                            speed=(0.5, 1.5), life=(8, 14), size=(2, 3), gravity=0)
+
+    def explode(self):
+        # major damage + knockback, thrown the way the shell was travelling
+        self.home.effects.append(Blast(self.owner, self.x, self.y, 140, damage=22, kbx=20, kby=11, stun=26,
+                                       mode="angle", angle=30, facing=1 if self.vx >= 0 else -1))
+
+
+class DroppedBomb(Explosive):
+    """The heavy down bomb: falls from the top of the screen and goes off when it touches the ground or anybody."""
+    def __init__(self, owner, x, y):
+        super().__init__(owner, x, y, 30, (35, 35, 45), border_colour=(255, 60, 40))
+        self.vy = 6
+        self.MAX_AGE = 300
+
+    def step(self):
+        self.vy = min(self.vy + 0.5, 16)
+        self.y += self.vy
+        if level.is_solid(self.x, self.y + self.size / 2):
+            self.detonate()
+
+    def explode(self):
+        self.home.effects.append(Blast(self.owner, self.x, self.y + 10, 190, damage=17, kbx=15, kby=15, stun=22))
+
+
+class BombDash(Move):
+    """side + light: dash a fair distance. Hit someone and they're knocked forward while Bombhead rockets up and away.
+    Miss and he has a LONG recovery."""
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.state, self.timer = "startup", 8
+        self.connected = False
+        self.hitbox = self.add_hitbox(Hitbox(owner, 56, 44, (28, 0), damage=7, kbx=13, kby=5, angle=20, stun=18))
+        self.hitbox.on_hit = self._landed
+
+    def _landed(self, target):
+        self.connected = True
+
+    def update(self, targets):
+        o = self.owner
+        self.timer -= 1
+
+        if self.state == "startup":                       # hang for a moment, no gravity
+            o.x_velocity = 0
+            o.y_velocity = 0
+            o.NoGravTimer = 2
+            if self.timer <= 0:
+                self.state, self.timer = "dash", 18
+                self.hitbox.set_active(True)
+
+        elif self.state == "dash":
+            o.x_velocity = 14 * self.facing
+            o.y_velocity = 0
+            o.NoGravTimer = 2
+            self.hitbox.place(o.x, o.y, self.facing)
+            self.hitbox.check(targets, self.facing)
+            if self.cancelled:                            # parried
+                return
+            if self.connected:                            # victim goes forward, Bombhead goes up and away
+                self.hitbox.set_active(False)
+                o.x_velocity = -8 * self.facing
+                o.y_velocity = -10
+                o.NoGravTimer = 0
+                self.end(recovery=8)
+                return
+            if self.timer <= 0:                           # whiffed
+                self.state, self.timer = "recovery", 32
+                self.hitbox.set_active(False)
+                o.x_velocity = 2 * self.facing
+
+        elif self.state == "recovery":
+            if self.timer <= 0:
+                self.end()
+
+
+class SlideKick(Move):
+    """down + light: a low sliding kick that knocks people upward. aerial=True slams to the floor first, then slides."""
+    def __init__(self, owner, aerial=False):
+        super().__init__(owner)
+        self.fall_frames = 0
+        if aerial:
+            self.state, self.timer = "slam", 0
+            owner.x_velocity = 0
+        else:
+            self.state, self.timer = "startup", 6
+        self.hitbox = self.add_hitbox(Hitbox(owner, 54, 26, (30, 12), damage=8, kbx=4, kby=13, angle=80, stun=16))
+
+    def update(self, targets):
+        o = self.owner
+
+        if self.state == "slam":
+            self.fall_frames += 1
+            o.y_velocity = 16
+            if o.coyote_time == COYOTE_TIME or self.fall_frames > 120:   # landed (or safety timeout)
+                self.state, self.timer = "startup", 5
+            return
+
+        self.timer -= 1
+        if self.state == "startup":
+            o.x_velocity = 0
+            if self.timer <= 0:
+                self.state, self.timer = "slide", 16
+                self.hitbox.set_active(True)
+        elif self.state == "slide":
+            o.x_velocity = 11 * self.facing                # the ground's friction takes a little off every frame
+            if self.timer <= 0:
+                self.state, self.timer = "recovery", 14
+                self.hitbox.set_active(False)
+                o.x_velocity = 3 * self.facing
+        elif self.state == "recovery":
+            if self.timer <= 0:
+                self.end()
+                return
+
+        self.hitbox.place(o.x, o.y, self.facing)
+        self.hitbox.check(targets, self.facing)
+
+
+class BlastLaunch(Move):
+    """up + heavy: set off an explosion just in front of Bombhead's feet. It launches HIM up and away from the way he's facing
+    (enough height to get back onto the stage), and hurts anyone standing in it. Twice per time on the floor."""
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.state, self.timer = "startup", 7
+        owner.up_blasts -= 1
+
+    def update(self, targets):
+        o = self.owner
+        self.timer -= 1
+        if self.state == "startup":
+            o.x_velocity = 0
+            o.y_velocity = 0
+            o.NoGravTimer = 2
+            if self.timer <= 0:
+                o.effects.append(Blast(o, o.x + 34 * self.facing, o.y + 10, 100, damage=6, kbx=9, kby=9, stun=14))
+                o.x_velocity = -8 * self.facing
+                o.y_velocity = -15
+                o.NoGravTimer = 4
+                self.state, self.timer = "recovery", 12
+        elif self.state == "recovery":
+            if self.timer <= 0:
+                self.end()
+
+
+class Haymaker(Attack):
+    """neutral + heavy: an enormous wind-up (you can see the sparks building), then one huge sideways hit.
+    Getting hit during the wind-up cancels it, same as any other move."""
+    def update(self, targets):
+        if self.frame < self.startup and self.frame % 5 == 0:
+            o = self.owner
+            power = self.frame / self.startup
+            Particles.burst(o.x + 14 * self.facing, o.y, count=1 + int(power * 3), colour=[(255, 140, 30), (255, 230, 80)],
+                            speed=(1, 2 + 4 * power), life=(8, 14), size=(2, 4), gravity=0)
+        super().update(targets)
+
+
+#==========================================================
+# CHARACTER: BOMBHEAD
+#==========================================================
+
+class Bombhead(Player):
+
+    title = "Bombhead"
+    blurb = "DEADMAN DANNY (30 seconds to live baby)"
+
+    FUSE_SECONDS = 30
+    FUSE_FRAMES = FUSE_SECONDS * 60           # (the game runs at 60 fps)
+    MAX_UP_BLASTS = 1                         # up + heavy uses between touching the floor
+    BAR_WIDTH = 100
+    # The fuse bar's colour as it drains: green -> gold -> yellow -> red   (fraction left, colour)
+    FUSE_COLOURS = [(1.0, (80, 210, 90)), (0.66, (240, 175, 25)), (0.33, (255, 240, 60)), (0.0, (235, 50, 50))]
+
+    def __init__(self, currentLevel, name, x=None, y=None, size=100, spawnIcon="p", controls=None, pad=None, pad_controls=None, slot=None):
+        super().__init__(currentLevel, name, x, y, size, spawnIcon, controls, pad, pad_controls, slot)
+        self.fuse = self.FUSE_FRAMES          # frames left to live
+        self.exploded = False
+        self.up_blasts = self.MAX_UP_BLASTS
+        self.effects = []                     # bombs and explosions
+        self.hud_tick = 0
+
+    #---------------- passive: the fuse ----------------
+
+    def should_die(self):
+        return self.exploded
+
+    def on_enemy_death(self, dead):
+        self.fuse = self.FUSE_FRAMES          # someone else died: fuse refilled
+
+    def reset_state(self):
+        super().reset_state()
+        self.fuse = self.FUSE_FRAMES          # respawning refills it too
+        self.exploded = False
+        self.up_blasts = self.MAX_UP_BLASTS
+
+    def self_destruct(self):
+        # Everyone nearby gets hurt and thrown; Bombhead dies (the match loop sees should_die() and respawns him)
+        self.effects.append(Blast(self, self.x, self.y, 320, damage=30, kbx=20, kby=20, stun=30, life=6))
+        self.exploded = True
+
+    def handle_movement(self, currentLevel):
+        if self.coyote_time == COYOTE_TIME:
+            self.up_blasts = self.MAX_UP_BLASTS
+        return super().handle_movement(currentLevel)
+
+    def update_attack(self, targets):
+        super().update_attack(targets)
+        if not self.exploded:
+            self.fuse -= 1
+            if self.fuse <= 0:
+                self.self_destruct()
+            elif self.fuse < 600 and self.fuse % 12 == 0:      # the last 10 seconds: smoke
+                Particles.burst(self.x, self.y - 14, count=2, colour=[(120, 120, 120), (255, 150, 40)],
+                                speed=(1, 3), life=(10, 20), size=(2, 4), gravity=-0.05)
+        for effect in self.effects[:]:
+            effect.update(targets)
+            if effect.done:
+                self.effects.remove(effect)
+
+    def cleanup(self):
+        for effect in self.effects:
+            effect.delete()
+        self.effects.clear()
+
+    #---------------- HUD ----------------
+
+    def make_hud(self, x, y):
+        self.bar_left = x - self.BAR_WIDTH / 2
+        back = Box(self.BAR_WIDTH, 10, "black", x, y, alpha=120, border=2, border_colour="black")
+        self.fill = Box(self.BAR_WIDTH, 10, self.FUSE_COLOURS[0][1], x, y)
+        self.label = Text("FUSE", x, y - 17, 16, PLAYER_COLOURS[self.slot], outline=2)
+        self.pips = [Box(10, 10, (255, 150, 40), x + self.BAR_WIDTH / 2 + 14 + i * 14, y, border=2, border_colour="black", radius=5)
+                     for i in range(self.MAX_UP_BLASTS)]               # how many up + heavy blasts are left
+        self.hud_sprites = [back, self.fill, self.label] + self.pips
+
+    def fuse_colour(self, fraction):
+        stops = self.FUSE_COLOURS
+        for (hi_f, hi_c), (lo_f, lo_c) in zip(stops, stops[1:]):
+            if fraction >= lo_f:
+                t = (fraction - lo_f) / (hi_f - lo_f)
+                return tuple(int(lo_c[i] + (hi_c[i] - lo_c[i]) * t) for i in range(3))
+        return stops[-1][1]
+
+    def update_hud(self):
+        self.hud_tick += 1
+        fraction = max(0, self.fuse / self.FUSE_FRAMES)
+        width = max(1, self.BAR_WIDTH * fraction)
+        self.fill.width = width
+        self.fill.x = self.bar_left + width / 2
+        self.fill.colour = self.fuse_colour(fraction)
+        self.fill.alpha = 255 if self.fuse > 600 or (self.hud_tick // 6) % 2 else 120      # flashes in the last 10 seconds
+        self.label.text = f"FUSE  {max(0, math.ceil(self.fuse / 60))}s"
+        for i, pip in enumerate(self.pips):
+            pip.alpha = 255 if i < self.up_blasts else 40
+
+    #---------------- input ----------------
+
+    def attackChecks(self, targets=()):
+        if not self.actionable:
+            return
+
+        heavy = self.pressed("heavy")
+        light = self.pressed("light")
+        if not (heavy or light):
+            return
+
+        grounded = self.coyote_time == COYOTE_TIME
+        down = self.held("down")
+        side = self.held("left") or self.held("right")
+        up = self.held("up")
+
+        if heavy:
+            if down:
+                self.drop_bomb()
+            elif up:
+                self.blast_launch()
+            elif side:
+                self.shell()
+            else:
+                self.haymaker()
+        else:
+            if down:
+                self.slide_kick(aerial=not grounded)
+            elif up:
+                self.upswing()
+            elif side:
+                self.bomb_dash()
+            else:
+                # Neutral light: riposte if someone nearby was just parried, otherwise throw a bomb
+                if not self.try_riposte(targets):
+                    self.throw_bomb()
+
+    #---------------- HEAVY ----------------
+
+    def blast_launch(self):   # up + heavy: explosion in front that launches him up and away (2 per floor touch)
+        if self.up_blasts > 0:
+            self.start_attack(BlastLaunch(self))
+
+    def shell(self):          # side + heavy: really slow explosive round, only goes off on a person
+        def fire(owner):
+            owner.effects.append(Shell(owner, owner.x + 22 * owner.facing, owner.y - 2, owner.facing))
+        self.start_attack(Attack(self, 1, 1, (0, 0), startup=16, active=0, recovery=26,
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
+
+    def drop_bomb(self):      # down + heavy: a bomb falls in from the top of the screen, in front of him
+        def fire(owner):
+            x = max(40, min(level.width - 40, owner.x + 80 * owner.facing))
+            top = Stage.camera.y - Screen.height / 2 - 20
+            owner.effects.append(DroppedBomb(owner, x, top))
+        self.start_attack(Attack(self, 1, 1, (0, 0), startup=14, active=0, recovery=16,
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
+
+    def haymaker(self):       # neutral + heavy: crazy long wind-up, then a huge sideways hit
+        self.start_attack(Haymaker(self, width=76, height=50, offset=(44, 0), startup=70, active=5, recovery=26,
+                                   damage=30, knockbackx=24, knockbacky=7, angle=15, stun=24))
+
+    #---------------- LIGHT ----------------
+
+    def upswing(self):        # up + light: simple upward swing (same shape as Ven's)
+        self.start_attack(Attack(self, width=70, height=65, offset=(0, -25), startup=4, active=4, recovery=9,
+                                 damage=5, knockbackx=5, knockbacky=11, angle=90, stun=12))
+
+    def bomb_dash(self):      # side + light: dash at them (see BombDash)
+        self.start_attack(BombDash(self))
+
+    def slide_kick(self, aerial=False):   # down + light: slide kick (in the air: slam down first)
+        self.start_attack(SlideKick(self, aerial))
+
+    def throw_bomb(self):     # neutral + light: lob a small bomb that bounces once, then goes off
+        def fire(owner):
+            owner.effects.append(Bomb(owner, owner.x + 16 * owner.facing, owner.y - 4, owner.facing))
+        self.start_attack(Attack(self, 1, 1, (0, 0), startup=8, active=0, recovery=16,
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
+
+#==========================================================
+# CHARACTER: ANGELLICA - light constructs and special moves
+#   GravityField - a big box where everybody falls slower (registered in gravity_fields, which Player.handle_movement reads)
+#   LightPillar  - a full-height column of light that lingers and ticks damage
+#   Starball     - the three-bar heavy: slides to a stop, charges, then a long growing explosion
+#   Orb          - one of the three neutral-light orbs: hovers, tracks, locks on, pauses, fires
+#   WingBurst / GrabSlam / AscendSurge - multi-stage moves
+#   Everything she summons lives in her `effects` list, which she updates every frame (like Bombhead and Cap'n Rex).
+#==========================================================
+
+class GravityField:
+    """Inside the box, gravity is multiplied by `scale` for EVERY player (Angellica included)."""
+    def __init__(self, owner, x, y, size=380, scale=0.3, life=480):
+        self.owner, self.x, self.y, self.size, self.scale, self.life = owner, x, y, size, scale, life
+        self.done = False
+        self.vis = Box(size, size, (150, 200, 255), x, y, alpha=45, border=3, border_colour=(190, 225, 255), radius=24, fixed=False)
+        gravity_fields.append(self)
+
+    def contains(self, player):
+        half = self.size / 2
+        return abs(player.x - self.x) <= half and abs(player.y - self.y) <= half
+
+    def update(self, targets):
+        self.life -= 1
+        if self.life < 60:                                    # flickers when it's about to end
+            self.vis.alpha = 45 if (self.life // 5) % 2 else 15
+        if self.life % 8 == 0:                                # little motes drifting upward
+            half = int(self.size / 2)
+            Particles.burst(self.x + random_number(-half, half), self.y + random_number(-half, half), count=1,
+                            colour=(200, 230, 255), direction=0, spread=20, speed=(0.5, 1.5), life=(30, 50), size=(2, 3), gravity=-0.02)
+        if self.life <= 0:
+            self.delete()
+
+    def delete(self):
+        if not self.done:
+            self.done = True
+            if self in gravity_fields:
+                gravity_fields.remove(self)
+            self.vis.delete()
+
+
+class LightPillar:
+    """A column from the top of the stage to the bottom. A thin warning first, then it lingers and hits again every few frames."""
+    WIDTH, WARN, ACTIVE, REARM = 90, 18, 56, 14
+
+    def __init__(self, owner, x, facing):
+        self.owner, self.x, self.facing = owner, x, facing
+        self.y = level.height / 2
+        self.t = 0
+        self.done = False
+        self.hitbox = Hitbox(owner, self.WIDTH, level.height, (0, 0), damage=7, kbx=4, kby=8, angle=80, stun=10, colour=(255, 245, 190))
+        self.hitbox.projectile = _NoReflect()                 # a parry blocks it but doesn't stun Angellica
+        self.vis = Box(20, level.height, (255, 245, 190), x, self.y, alpha=40, fixed=False)
+
+    def update(self, targets):
+        self.t += 1
+        if self.t <= self.WARN:
+            self.vis.width = 20 + (self.WIDTH - 20) * self.t / self.WARN
+            return
+        if self.t == self.WARN + 1:
+            self.vis.width, self.vis.alpha = self.WIDTH, 110
+            Sound.play("BlastBounceFire")
+        if (self.t - self.WARN - 1) % self.REARM == 0:        # switch off and on again so it can hit everyone once more
+            self.hitbox.set_active(False)
+            self.hitbox.set_active(True)
+        self.hitbox.place(self.x, self.y, 1)
+        self.hitbox.check([p for p in players if p is not self.owner], self.facing)
+        if self.t > self.WARN + self.ACTIVE - 10:
+            self.vis.alpha = max(0, self.vis.alpha - 8)
+        if self.t >= self.WARN + self.ACTIVE:
+            self.delete()
+
+    def delete(self):
+        if not self.done:
+            self.done = True
+            self.hitbox.delete()
+            self.vis.delete()
+
+
+class Starball:
+    """The three-bar heavy. Slides out, slows to a stop (no gravity), charges for a moment, then explodes in a big
+    growing blast that lingers and hits again every few frames, with a harder final pulse."""
+    BOOM_FRAMES, CHARGE_FRAMES, REARM = 200, 22, 14
+
+    def __init__(self, owner, x, y, direction):
+        self.owner, self.x, self.y = owner, x, y
+        self.vx = 11 * direction
+        self.state, self.t = "fly", 0
+        self.done = False
+        self.box = Box(26, 26, (255, 240, 170), x, y, border=3, border_colour="white", radius=13, fixed=False)
+        self.hitbox = Hitbox(owner, 10, 10, (0, 0), damage=15, kbx=11, kby=11, angle=45, stun=10, mode="radial", colour=(255, 240, 170))
+        self.hitbox.projectile = _NoReflect()
+        self.final = False
+
+    def update(self, targets):
+        self.t += 1
+        if self.state == "fly":
+            self.vx *= 0.93
+            nx = self.x + self.vx
+            if level.is_solid(nx + math.copysign(13, self.vx), self.y):
+                self.vx = 0                                   # hit a wall: stops dead
+            else:
+                self.x = nx
+            if abs(self.vx) < 0.4 or self.t > 240:
+                self.state, self.t = "charge", 0
+
+        elif self.state == "charge":                          # pulses so you know it's about to go
+            self.box.width = self.box.height = 26 + (self.t % 6) * 2
+            if self.t >= self.CHARGE_FRAMES:
+                self.state, self.t = "boom", 0
+                self.hitbox.set_active(True)
+                Sound.play("BlastBounceFire")
+
+        elif self.state == "boom":
+            progress = self.t / self.BOOM_FRAMES
+            size = 40 + 400 * progress
+            self.hitbox.zone.width = self.hitbox.zone.height = size
+            self.box.width = self.box.height = size
+            self.box.radius = size / 2
+            self.box.alpha = 160 * (1 - progress * 0.7)
+            if self.t % 3 == 0:
+                Particles.burst(self.x, self.y, count=3, colour=[(255, 240, 170), (255, 255, 255), (190, 225, 255)],
+                                speed=(1, 2 + size / 60), life=(10, 20), size=(2, 5), gravity=0)
+            if self.t == self.BOOM_FRAMES - 8 and not self.final:       # the last pulse hits much harder
+                self.final = True
+                self.hitbox.damage, self.hitbox.kbx, self.hitbox.kby, self.hitbox.stun = 12, 16, 16, 22
+                self.hitbox.set_active(False)
+                self.hitbox.set_active(True)
+            elif self.t % self.REARM == 1:
+                self.hitbox.set_active(False)
+                self.hitbox.set_active(True)
+            self.hitbox.place(self.x, self.y, 1)
+            self.hitbox.check([p for p in players if p is not self.owner], 1)
+            if self.t >= self.BOOM_FRAMES:
+                self.delete()
+                return
+        self.box.go_to(self.x, self.y)
+
+    def delete(self):
+        if not self.done:
+            self.done = True
+            self.hitbox.delete()
+            self.box.delete()
+
+
+class Orb:
+    """Hovers above Angellica and follows her, turning to face the nearest enemy. Then it LOCKS (goes red and stops),
+    waits a moment, and shoots quickly along the line it locked. If Angellica is hit before it fires, it pops."""
+    TRACK, LOCK = 40, 14
+
+    def __init__(self, owner, ox, oy, extra_delay):
+        self.owner, self.ox, self.oy, self.extra = owner, ox, oy, extra_delay
+        self.x, self.y = owner.x + ox, owner.y + oy
+        self.aim = (owner.facing, 0)
+        self.state, self.t = "track", 0
+        self.done = False
+        self.box = Box(14, 14, (255, 240, 170), self.x, self.y, border=2, border_colour="white", radius=7, fixed=False)
+
+    def nearest_aim(self):
+        foes = [p for p in players if p is not self.owner]
+        if not foes:
+            return self.aim
+        t = min(foes, key=lambda p: math.hypot(p.x - self.x, p.y - self.y))
+        dx, dy = t.x - self.x, t.y - self.y
+        dist = math.hypot(dx, dy) or 1
+        return (dx / dist, dy / dist)
+
+    def update(self, targets):
+        self.t += 1
+        o = self.owner
+        if self.state == "track":
+            self.x, self.y = o.x + self.ox, o.y + self.oy
+            self.aim = self.nearest_aim()
+            if self.t % 6 == 0:                               # a little spark shows where it's looking
+                Particles.burst(self.x + self.aim[0] * 14, self.y + self.aim[1] * 14, count=1, colour=(255, 255, 255),
+                                speed=(0.2, 0.6), life=(4, 8), size=(2, 2), gravity=0)
+            if self.t >= self.TRACK:
+                self.state, self.t = "lock", 0
+                self.box.colour = (255, 90, 90)
+        elif self.state == "lock":
+            if self.t >= self.LOCK + self.extra:
+                self.fire()
+                return
+        self.box.go_to(self.x, self.y)
+
+    def fire(self):
+        o = self.owner
+        dx, dy = self.aim
+        facing = 1 if dx >= 0 else -1
+        angle = math.degrees(math.atan2(-dy, abs(dx)))        # Projectile angles: 0 = straight ahead, 90 = up, negative = down
+        hb = Hitbox(o, 14, 14, (0, 0), damage=4, kbx=6, kby=5, angle=20, stun=10, colour=(255, 240, 170))
+        def landed(target):
+            if hb.owner is o:                                 # (a parried orb that comes back doesn't refill HER bar)
+                o.light_hit(target)
+        hb.on_hit = landed
+        Projectile(self.x, self.y, facing, speed=17, lifetime=45, hitbox=hb, angle=angle)
+        self.delete()
+
+    def delete(self):
+        if not self.done:
+            self.done = True
+            self.box.delete()
+
+
+class WingBurst(Move):
+    """down + light: wings shoot out of both sides at once."""
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.frame = 0
+        self.right = self.add_hitbox(Hitbox(owner, 80, 36, (50, -6), damage=6, kbx=11, kby=8, angle=30, stun=12, colour=(255, 245, 210)))
+        self.left = self.add_hitbox(Hitbox(owner, 80, 36, (-50, -6), damage=6, kbx=11, kby=8, angle=30, stun=12, colour=(255, 245, 210)))
+        self.left.already_hit = self.right.already_hit        # someone in the middle is only hit once
+        for hb in (self.right, self.left):
+            hb.on_hit = owner.light_hit
+
+    def update(self, targets):
+        o = self.owner
+        self.frame += 1
+        on = 6 <= self.frame < 12
+        self.right.set_active(on)
+        self.left.set_active(on)
+        self.right.place(o.x, o.y, 1)                         # facing 1 for both: the offsets already put them on opposite sides...
+        self.left.place(o.x, o.y, 1)
+        self.right.check(targets, 1)                          # ...and this knocks each victim AWAY from Angellica
+        self.left.check(targets, -1)
+        if self.cancelled:
+            return
+        if self.frame >= 22:
+            self.end()
+
+
+class GrabSlam(Move):
+    """side + light: dash forward. Catch someone and she hops up (carrying them forward), then slams down:
+    the landing sends out a wide hit around her. Miss and she has a long recovery."""
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.state, self.timer = "startup", 8
+        self.target = None
+        self.fall_frames = 0
+        self.grab = self.add_hitbox(Hitbox(owner, 48, 40, (28, 0), damage=3, kbx=0, kby=0, angle=0, stun=0, colour=(255, 245, 210)))
+        self.grab.on_hit = self._grabbed
+        self.slam = self.add_hitbox(Hitbox(owner, 150, 56, (0, 12), damage=14, kbx=12, kby=14, angle=60, stun=24, mode="radial", colour=(255, 245, 210)))
+        self.slam.on_hit = owner.light_hit
+
+    def _grabbed(self, target):
+        if self.target is None:
+            self.target = target
+            self.owner.light_hit(target)
+
+    def hold(self):                                           # keep the caught player pinned to her, helpless
+        o, t = self.owner, self.target
+        t.actionableTimer = 20
+        t.NoGravTimer = 2
+        t.x_velocity = t.y_velocity = 0
+        tx, ty = o.x + 24 * self.facing, o.y + 4
+        if level.is_solid(tx, ty):
+            tx, ty = o.x, o.y
+        t.x, t.y = tx, ty
+
+    def update(self, targets):
+        o = self.owner
+        self.timer -= 1
+
+        if self.state == "startup":
+            o.x_velocity = 0
+            o.y_velocity = 0
+            o.NoGravTimer = 2
+            if self.timer <= 0:
+                self.state, self.timer = "dash", 14
+                self.grab.set_active(True)
+
+        elif self.state == "dash":
+            o.x_velocity = 13 * self.facing
+            o.y_velocity = 0
+            o.NoGravTimer = 2
+            self.grab.place(o.x, o.y, self.facing)
+            self.grab.check(targets, self.facing)
+            if self.cancelled:                                # parried
+                return
+            if self.target is not None:                       # caught someone: hop up and forward
+                self.grab.set_active(False)
+                self.state, self.timer = "rise", 16
+                o.x_velocity = 5 * self.facing
+                o.y_velocity = -9
+                o.NoGravTimer = 0
+                self.hold()
+            elif self.timer <= 0:                             # whiffed: long recovery
+                self.state, self.timer = "recovery", 26
+                self.grab.set_active(False)
+                o.x_velocity = 2 * self.facing
+
+        elif self.state == "rise":
+            self.hold()
+            o.x_velocity = 5 * self.facing
+            if self.timer <= 0:
+                self.state = "slam"
+
+        elif self.state == "slam":
+            self.hold()
+            self.fall_frames += 1
+            o.y_velocity = 18
+            o.x_velocity = 3 * self.facing
+            if o.coyote_time == COYOTE_TIME or self.fall_frames > 120:     # landed (or safety timeout)
+                t = self.target
+                self.target = None                            # let go BEFORE the slam hitbox, so cancel() doesn't undo its stun
+                t.actionableTimer = 0
+                t.NoGravTimer = 0
+                o.x_velocity = 0
+                self.state, self.timer = "impact", 5
+                self.slam.set_active(True)
+                Particles.burst(o.x, o.y + 14, count=24, colour=[(255, 245, 210), (190, 225, 255)], direction=0, spread=160,
+                                speed=(2, 6), life=(10, 20), size=(2, 4), gravity=0.2)
+                Sound.play("Heavy Hitter")
+            else:
+                return
+
+        elif self.state == "impact":
+            if self.timer <= 0:
+                self.state, self.timer = "recovery", 18
+                self.slam.set_active(False)
+
+        elif self.state == "recovery":
+            if self.timer <= 0:
+                self.end()
+                return
+
+        if self.state == "impact" and self.slam.active:       # the slam's hits (including the landing frame itself)
+            self.slam.place(o.x, o.y, 1)
+            self.slam.check(targets, 1)
+
+    def cancel(self):
+        t = self.target
+        if t is not None:                                     # she got hit mid-carry: drop them
+            self.target = None
+            t.actionableTimer = 0
+            t.NoGravTimer = 0
+        super().cancel()
+
+
+class AscendSurge(Move):
+    """up + heavy: a short prepare, then she surges upward with a hitbox around her.
+    Hold left or right during the prepare to tilt the surge a little that way."""
+    MAX_TILT = 25                 # degrees away from straight up
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.state, self.timer = "startup", 16
+        self.tilt = 0
+        self.hitbox = self.add_hitbox(Hitbox(owner, 64, 64, (0, 0), damage=9, kbx=8, kby=11, angle=80, stun=16, mode="radial", colour=(255, 245, 210)))
+        self.hitbox.on_hit = owner.light_hit
+        owner.surges -= 1
+
+    def update(self, targets):
+        o = self.owner
+        self.timer -= 1
+
+        if self.state == "startup":
+            o.x_velocity = 0
+            o.y_velocity = 0
+            o.NoGravTimer = 2
+            steer = (1 if o.held("right") else 0) - (1 if o.held("left") else 0)
+            if steer:
+                self.tilt = steer * self.MAX_TILT             # the last direction you held wins
+            a = math.radians(self.tilt)
+            Particles.burst(o.x + 22 * math.sin(a), o.y - 22 * math.cos(a), count=1, colour=(255, 255, 255),
+                            direction=self.tilt, spread=10, speed=(1, 2), life=(6, 10), size=(2, 3), gravity=0)
+            if self.timer <= 0:
+                self.state, self.timer = "surge", 16
+                self.hitbox.set_active(True)
+                Sound.play("BlastBounceFire")
+
+        elif self.state == "surge":
+            a = math.radians(self.tilt)
+            o.x_velocity = 14 * math.sin(a)
+            o.y_velocity = -14 * math.cos(a)
+            o.NoGravTimer = 2
+            self.hitbox.place(o.x, o.y, self.facing)
+            self.hitbox.check(targets, self.facing)
+            if self.cancelled:
+                return
+            if self.timer <= 0:
+                self.state, self.timer = "recovery", 14
+                self.hitbox.set_active(False)
+                o.x_velocity *= 0.4
+                o.y_velocity *= 0.3
+                o.NoGravTimer = 0
+
+        elif self.state == "recovery":
+            if self.timer <= 0:
+                self.end()
+
+
+#==========================================================
+# CHARACTER: ANGELLICA
+#==========================================================
+
+class Angellica(Player):
+
+    title = "Angellica"
+    blurb = "Floaty and quick. Three bars of light fuel her heavies, and hitting people in the air refills them."
+
+    MAX_LIGHT = 3
+    MAX_SURGES = 1                # up + heavy uses between touching the floor
+    SEG_W, SEG_GAP = 30, 4
+
+    def __init__(self, currentLevel, name, x=None, y=None, size=100, spawnIcon="p", controls=None, pad=None, pad_controls=None, slot=None):
+        super().__init__(currentLevel, name, x, y, size, spawnIcon, controls, pad, pad_controls, slot)
+        self.gravity = 0.28                       # passive: reduced gravity...
+        self.max_dash_charges = 2                 # ...and two air dashes
+        self.light = self.MAX_LIGHT
+        self.surges = self.MAX_SURGES
+        self.regain_lock = 0                      # frames after a refill where hits can't refill again (so 3 orbs landing together = 1 bar)
+        self.deny_timer = 0                       # flashes the bar red when you can't afford a move
+        self.field = None                         # her current gravity field (a new one replaces it)
+        self.effects = []
+        self.hud_tick = 0
+
+    #---------------- passive: the light bar ----------------
+
+    def light_hit(self, target):
+        """Called by every hitbox of an attack that does NOT cost light. Hitting someone while she's airborne refills a bar."""
+        airborne = self.coyote_time != COYOTE_TIME
+        if airborne and self.regain_lock == 0 and self.light < self.MAX_LIGHT:
+            self.light += 1
+            self.regain_lock = 30
+            Particles.burst(self.x, self.y, count=12, colour=[(255, 240, 170), (255, 255, 255)],
+                            speed=(2, 5), life=(10, 20), size=(2, 4), gravity=-0.05)
+
+    def spend(self, amount):
+        if self.light < amount:
+            self.deny_timer = 20
+            return False
+        self.light -= amount
+        return True
+
+    def free(self, move):                         # tags a move as "costs no light", so landing it in the air refills a bar
+        for hb in move.hitboxes:
+            hb.on_hit = self.light_hit
+        return move
+
+    def clear_orbs(self):
+        for effect in self.effects:
+            if isinstance(effect, Orb):
+                effect.delete()
+
+    def on_hit(self):
+        super().on_hit()
+        self.clear_orbs()                         # orbs that haven't fired yet pop when she's hit
+
+    def reset_state(self):
+        super().reset_state()
+        self.light = self.MAX_LIGHT
+        self.surges = self.MAX_SURGES
+        self.regain_lock = 0
+        self.clear_orbs()
+
+    def handle_movement(self, currentLevel):
+        if self.deny_timer > 0: self.deny_timer -= 1
+        if self.coyote_time == COYOTE_TIME:
+            self.surges = self.MAX_SURGES
+        return super().handle_movement(currentLevel)
+
+    def update_attack(self, targets):
+        super().update_attack(targets)
+        if self.regain_lock > 0: self.regain_lock -= 1
+        for effect in self.effects[:]:
+            effect.update(targets)
+            if effect.done:
+                self.effects.remove(effect)
+
+    def cleanup(self):
+        for effect in self.effects:
+            effect.delete()
+        self.effects.clear()
+
+    #---------------- HUD ----------------
+
+    def make_hud(self, x, y):
+        total = self.MAX_LIGHT * self.SEG_W + (self.MAX_LIGHT - 1) * self.SEG_GAP
+        left = x - total / 2 + self.SEG_W / 2
+        self.segs = [Box(self.SEG_W, 10, (255, 235, 140), left + i * (self.SEG_W + self.SEG_GAP), y, border=2, border_colour="black", radius=3)
+                     for i in range(self.MAX_LIGHT)]
+        self.label = Text("LIGHT", x, y - 17, 16, PLAYER_COLOURS[self.slot], outline=2)
+        self.hud_sprites = self.segs + [self.label]
+
+    def update_hud(self):
+        self.hud_tick += 1
+        for i, seg in enumerate(self.segs):
+            if i < self.light:
+                seg.colour, seg.alpha = (255, 235, 140), 255
+            elif self.deny_timer > 0:
+                seg.colour, seg.alpha = (230, 60, 60), 255            # red flash: "can't afford that!"
+            else:
+                seg.colour, seg.alpha = (255, 235, 140), 40
+
+    #---------------- input ----------------
+
+    def attackChecks(self, targets=()):
+        if not self.actionable:
+            return
+
+        heavy = self.pressed("heavy")
+        light = self.pressed("light")
+        if not (heavy or light):
+            return
+
+        down = self.held("down")
+        side = self.held("left") or self.held("right")
+        up = self.held("up")
+
+        if heavy:
+            if down:
+                self.light_pillar()
+            elif up:
+                self.ascend()
+            elif side:
+                self.starball()
+            else:
+                self.gravity_zone()
+        else:
+            if down:
+                self.wings()
+            elif up:
+                self.column()
+            elif side:
+                self.grab_slam()
+            else:
+                # Neutral light: riposte if someone nearby was just parried, otherwise summon the orbs
+                if not self.try_riposte(targets):
+                    self.orbs()
+
+    #---------------- HEAVY ----------------
+
+    def gravity_zone(self):   # neutral + heavy (1 bar): a big area where everyone falls slower
+        if not self.spend(1):
+            return
+        def fire(owner):
+            if owner.field is not None:
+                owner.field.delete()                      # only one at a time
+            owner.field = GravityField(owner, owner.x, owner.y)
+            owner.effects.append(owner.field)
+        self.start_attack(Attack(self, 1, 1, (0, 0), startup=12, active=0, recovery=14,
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
+
+    def light_pillar(self):   # down + heavy (1 bar): a full-height column of light in front of her that lingers
+        if not self.spend(1):
+            return
+        def fire(owner):
+            x = max(60, min(level.width - 60, owner.x + 100 * owner.facing))
+            owner.effects.append(LightPillar(owner, x, owner.facing))
+        self.start_attack(Attack(self, 1, 1, (0, 0), startup=12, active=0, recovery=16,
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
+
+    def ascend(self):         # up + heavy (free, but once per floor touch): prepare, then surge up (see AscendSurge)
+        if self.surges > 0:
+            self.start_attack(AscendSurge(self))
+
+    def starball(self):       # side + heavy (all 3 bars): a ball that coasts to a stop, then a long growing explosion
+        if not self.spend(self.MAX_LIGHT):
+            return
+        def fire(owner):
+            owner.effects.append(Starball(owner, owner.x + 20 * owner.facing, owner.y - 2, owner.facing))
+        self.start_attack(Attack(self, 1, 1, (0, 0), startup=14, active=0, recovery=24,
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
+
+    #---------------- LIGHT ----------------
+
+    def wings(self):          # down + light: wings out on both sides
+        self.start_attack(WingBurst(self))
+
+    def column(self):         # up + light: a column straight up
+        self.start_attack(self.free(Attack(self, width=34, height=250, offset=(0, -135), startup=8, active=6, recovery=12,
+                                           damage=7, knockbackx=3, knockbacky=13, angle=90, stun=14)))
+
+    def grab_slam(self):      # side + light: dash grab into a slam
+        self.start_attack(GrabSlam(self))
+
+    def orbs(self):           # neutral + light: three orbs rise, track, lock on, pause, then fire
+        def fire(owner):
+            for ox, oy, delay in ((-34, -44, 0), (0, -62, 6), (34, -44, 12)):
+                owner.effects.append(Orb(owner, ox, oy, delay))
+        self.start_attack(Attack(self, 1, 1, (0, 0), startup=8, active=0, recovery=14,
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
+
 #All character list
 
 CHARACTERS = {
     "Ven": Ven,
     "Rend": Rend,
     "Cleaning Lady": CleaningLady,
-    "Cap'n Rex": CaptnRex
+    "Cap'n Rex": CaptnRex,
+    "Bombhead": Bombhead,
+    "Angellica": Angellica
 }
 
 #==========================================================
@@ -2109,6 +3194,10 @@ def respawn(player):
     player.go_to(px, py)
 
     player.health = 0
+
+    for other in players:                   # lets characters react to a death (Bombhead's fuse refills)
+        if other is not player:
+            other.on_enemy_death(player)
 
 
 
@@ -2219,7 +3308,7 @@ def run_match():
             proj.update([p for p in players if p is not proj.owner], level)
 
         for p in players:
-            if level.touching(p, "Z") or level.touching(p, "Q"): #TODO: Death Code #ALSO "Q" is used so that the Capt'n barrel isnt killed by the top blastzone
+            if p.should_die() or level.touching(p, "Z") or level.touching(p, "Q"): #TODO: Death Code #ALSO "Q" is used so that the Capt'n barrel isnt killed by the top blastzone
                 respawn(p)
 
         for i, p in enumerate(players):
