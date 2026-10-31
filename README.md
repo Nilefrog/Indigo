@@ -17,6 +17,12 @@ Download the latest release from the [Releases](https://github.com/Nilefrog/Indi
 - Parrying and combat mechanics
 - Customisable match settings
 
+## Characters
+
+Indigo has 8 playable characters, each with their own moves and mechanics.
+
+See [CHARACTERS.md](CHARACTERS.md) for the full character and moveset reference.
+
 ## Running from Source
 
 Requires Python.
