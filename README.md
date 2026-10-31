@@ -2,7 +2,7 @@
 
 A simple platform fighter built with Python and Pygame.
 
-## Download
+# Download
 
 Download the latest release from the [Releases](https://github.com/Nilefrog/Indigo/releases) page.
 
