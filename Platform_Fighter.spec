@@ -9,6 +9,7 @@ a = Analysis(
         ('tiles', 'tiles'),
         ('sprites', 'sprites'),
         ('sounds', 'sounds'),
+        ('fonts', 'fonts'),
     ],
     hiddenimports=[],
     hookspath=[],
