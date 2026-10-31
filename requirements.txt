@@ -1,0 +1,6 @@
+# Platform Fighter - install with:  pip install -r requirements.txt
+pygame>=2.5.0
+
+# Optional: lets "Host a Server" open the router port automatically (UPnP).
+# Skip it if it fails to install; hosting still works with manual port forwarding.
+miniupnpc

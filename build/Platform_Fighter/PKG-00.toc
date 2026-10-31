@@ -1,0 +1,55 @@
+('C:\\Users\\User\\OneDrive\\Desktop\\Coding Projects\\GameSnake\\Platform '
+ 'Fighter Project\\build\\Platform_Fighter\\Platform_Fighter.pkg',
+ {'BINARY': True,
+  'DATA': True,
+  'EXECUTABLE': True,
+  'EXTENSION': True,
+  'PYMODULE': True,
+  'PYSOURCE': True,
+  'PYZ': False,
+  'SPLASH': True,
+  'SYMLINK': False},
+ [('pyi-contents-directory _internal', '', 'OPTION'),
+  ('PYZ-00.pyz',
+   'C:\\Users\\User\\OneDrive\\Desktop\\Coding Projects\\GameSnake\\Platform '
+   'Fighter Project\\build\\Platform_Fighter\\PYZ-00.pyz',
+   'PYZ'),
+  ('struct',
+   'C:\\Users\\User\\OneDrive\\Desktop\\Coding Projects\\GameSnake\\Platform '
+   'Fighter Project\\build\\Platform_Fighter\\localpycs\\struct.pyc',
+   'PYMODULE'),
+  ('pyimod01_archive',
+   'C:\\Users\\User\\OneDrive\\Desktop\\Coding Projects\\GameSnake\\Platform '
+   'Fighter Project\\build\\Platform_Fighter\\localpycs\\pyimod01_archive.pyc',
+   'PYMODULE'),
+  ('pyimod02_importers',
+   'C:\\Users\\User\\OneDrive\\Desktop\\Coding Projects\\GameSnake\\Platform '
+   'Fighter '
+   'Project\\build\\Platform_Fighter\\localpycs\\pyimod02_importers.pyc',
+   'PYMODULE'),
+  ('pyimod03_ctypes',
+   'C:\\Users\\User\\OneDrive\\Desktop\\Coding Projects\\GameSnake\\Platform '
+   'Fighter Project\\build\\Platform_Fighter\\localpycs\\pyimod03_ctypes.pyc',
+   'PYMODULE'),
+  ('pyimod04_pywin32',
+   'C:\\Users\\User\\OneDrive\\Desktop\\Coding Projects\\GameSnake\\Platform '
+   'Fighter Project\\build\\Platform_Fighter\\localpycs\\pyimod04_pywin32.pyc',
+   'PYMODULE'),
+  ('pyiboot01_bootstrap',
+   'C:\\Users\\User\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python313\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
+   'PYSOURCE'),
+  ('pyi_rth_inspect',
+   'C:\\Users\\User\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python313\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py',
+   'PYSOURCE'),
+  ('Platform_Fighter',
+   'C:\\Users\\User\\OneDrive\\Desktop\\Coding Projects\\GameSnake\\Platform '
+   'Fighter Project\\Platform_Fighter.py',
+   'PYSOURCE')],
+ 'python313.dll',
+ True,
+ False,
+ False,
+ [],
+ None,
+ None,
+ None)
