@@ -332,6 +332,7 @@ class Hitbox: # Damaging Hitboxes
         dealt = self.damage * match.rules.damage_mult * getattr(self.owner, "power", 1)        # the Damage Rate rule, and the owner's attack power (Sion's Pain Trade)
         target.health += dealt
         ms.record_hit(self.owner, target, dealt)             # stats + remembers who hit you last (for kill credit)
+        training_on_hit(self.owner, target, dealt)           # combo counter (does nothing outside training)
         scale = (target.health / 200) + 1
         a = math.radians(self.angle)
         if not self.projectile:
@@ -856,10 +857,42 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
 
 #Dummies <3 (theyre gonna get murdered)
 
+DUMMY_BEHAVIOURS = ["Stand Still", "Walk", "Jump", "Parry Loop", "Parry on Attack"]
+DUMMY_REACTION = 14        # frames the "Parry on Attack" dummy needs to notice a nearby attack before it parries
+
 class Dummy(Player):
-    """A punching bag: no controls, so it never does anything on its own."""
-    def __init__(self, currentLevel, name, x=None, y=None, size=100, spawnIcon="e"):
-        super().__init__(currentLevel, name, x, y, size, spawnIcon, controls=None)
+    """A training partner. 'Stand Still' does nothing. Every other behaviour just presses buttons through the normal
+    held() / pressed() functions (see think()), so the dummy moves, jumps, dashes and parries by exactly the same rules as a player."""
+    def __init__(self, currentLevel, name, x=None, y=None, size=100, spawnIcon="e", slot=None):
+        super().__init__(currentLevel, name, x, y, size, spawnIcon, controls=None, slot=slot)
+        self.behaviour = DUMMY_BEHAVIOURS[0]
+        self.want_held, self.want_pressed = set(), set()
+        self.react = 0
+
+    def think(self, foes):
+        """Decides this frame's buttons. Called once per frame, before step_game."""
+        f = ms.State.frame
+        b = self.behaviour
+        self.want_held, self.want_pressed = set(), set()
+        if b == "Walk":
+            self.want_held.add("left" if (f // 30) % 2 == 0 else "right")
+        elif b == "Jump" and f % 75 == 0:
+            self.want_pressed.add("jump")
+        elif b == "Parry Loop" and f % 60 == 0:
+            self.want_pressed.add("parry")
+        if b == "Parry on Attack":
+            threat = any(o.current_attack is not None and abs(o.x - self.x) < 150 and abs(o.y - self.y) < 110 for o in foes)
+            self.react = self.react + 1 if threat else 0
+            if self.react == DUMMY_REACTION:
+                self.want_pressed.add("parry")
+        else:
+            self.react = 0
+
+    def held(self, action):
+        return action in self.want_held
+
+    def pressed(self, action):
+        return action in self.want_pressed
 
 #==========================================================
 # CHARACTER: VEN- special moves (multi-stage, so they get their own classes)
@@ -4285,6 +4318,9 @@ camera_zone = None
 focus = None
 ui = SimpleNamespace(feed=None, banner=None, clock=None)
 match = SimpleNamespace(rules=ms.Rules(), sd=False, out_counter=0, finishing=0, winners=[])
+training = SimpleNamespace(active=False, dummy=None, hud=[],
+                           behaviour=DUMMY_BEHAVIOURS[0], reset_damage=0, auto_reset=True,      # (these three are remembered between sessions)
+                           combo=0, combo_damage=0.0, last_hit=0.0, best=0, since_hit=999)
 
 def others(player):                     # everyone a player's attacks can hit
     return [p for p in players if p is not player]
@@ -4303,18 +4339,22 @@ def start_match(entries, rules, map_index=0, online=None):
     players, hud, stock_hud, tags, crowns, all_stats = [], {}, {}, {}, {}, []
     for entry in entries:
         slot, device = entry["slot"], entry.get("device")
-        if online:
-            controls, pad = None, None                  # buttons come from the network instead
+        if entry.get("dummy"):                          # training: the practice partner
+            player = Dummy(level, "player", 0, 0, spawnIcon=str(slot + 1), slot=slot)
+            training.dummy = player
         else:
-            controls, pad = (settings.keyboard[slot], None) if device[0] == "profile" else (None, device[1])
-        player = CHARACTERS[entry["character"]](
-            level, "player", 0, 0,
-            spawnIcon=str(slot + 1),
-            controls=controls,
-            pad=pad,
-            pad_controls=settings.pad[slot],
-            slot=slot
-        )
+            if online:
+                controls, pad = None, None                  # buttons come from the network instead
+            else:
+                controls, pad = (settings.keyboard[slot], None) if device[0] == "profile" else (None, device[1])
+            player = CHARACTERS[entry["character"]](
+                level, "player", 0, 0,
+                spawnIcon=str(slot + 1),
+                controls=controls,
+                pad=pad,
+                pad_controls=settings.pad[slot],
+                slot=slot
+            )
         if online:
             player.net = NetInput()
         player.facing = 1 if player.x < level.width / 2 else -1        # everyone starts looking towards the middle
@@ -4331,8 +4371,8 @@ def start_match(entries, rules, map_index=0, online=None):
         hud[slot] = Text("", hud_x, Screen.height - 40, 44, colour, outline=3)
         stock_hud[slot] = Text("", hud_x, Screen.height - 12, 22, colour, outline=2)
         player.make_hud(hud_x, Screen.height - 85)          # the character's own extra UI, just above the damage counter
-        tags[slot] = Text(names.get(slot, f"P{slot + 1}"), player.x, player.y - 28, 22, colour, outline=2, fixed=False)
-        if not online and ms.records.crown_slot == slot:    # last match's winner wears the crown
+        tags[slot] = Text(names.get(slot, "DUMMY" if isinstance(player, Dummy) else f"P{slot + 1}"), player.x, player.y - 28, 22, colour, outline=2, fixed=False)
+        if not online and ms.records.crown_slot == slot and not isinstance(player, Dummy):    # last match's winner wears the crown
             crowns[slot] = ms.Crown(player.x, player.y - 56, 30, fixed=False)
 
     ui.feed, ui.banner, ui.clock = ms.KillFeed(), ms.Banner(), ms.MatchClock()
@@ -4361,6 +4401,9 @@ def end_match():
         if helper is not None:
             helper.delete()
     ui.feed = ui.banner = ui.clock = None
+    for sprite in training.hud:
+        sprite.delete()
+    training.hud, training.active, training.dummy = [], False, None
     players, hud, stock_hud, tags, crowns = [], {}, {}, {}, {}
     Stage.camera.reset()
     camera_zone.delete()
@@ -4419,6 +4462,11 @@ def finish_match(winner_slots):
         ui.banner.show("DRAW!", 100, "white")
 
 def process_kos(ko_list):
+    if training.active:                                 # training: no stocks, no stats, no results. Just come back.
+        for p in ko_list:
+            respawn(p)
+            p.health = training.reset_damage if p is training.dummy else 0
+        return
     doomed = []
     for p in ko_list:
         for message, colour in ms.credit_ko(p.stats, stock_rules(), all_stats):
@@ -4699,6 +4747,162 @@ def play_online_match(client, payload):
         Menu("Match ended", [Item("OK", result="ok")], subtitle=why, spacing=68, width=420, back_result="ok").run()
     return False
 
+#==========================================================
+# TRAINING MODE
+#   Same fight code as a normal match (start_match / step_game), but: nobody loses stocks, there is no clock or results
+#   screen, nothing is saved, and a Dummy stands in for the opponent. The combo counter hooks in through training_on_hit().
+#==========================================================
+
+TRAINING_COMBO_GAP = 60         # frames between hits before it counts as a NEW combo
+TRAINING_AUTO_RESET = 120       # frames without being hit before the dummy's damage goes back to the preset
+TRAINING_DAMAGES = [0, 25, 50, 100, 150, 200, 300]
+
+def training_on_hit(attacker, target, dealt):
+    """Called from Hitbox.hit every time damage lands."""
+    if not training.active or target is not training.dummy or attacker is training.dummy:
+        return
+    if training.since_hit > TRAINING_COMBO_GAP:
+        training.combo, training.combo_damage = 0, 0.0
+    training.combo += 1
+    training.combo_damage += dealt
+    training.last_hit = dealt
+    training.since_hit = 0
+    training.best = max(training.best, training.combo)
+
+def training_reset():
+    """Everyone back to their spawn point, projectiles gone, dummy back to its preset damage."""
+    for proj in projectiles[:]:
+        proj.hitbox.delete()
+        projectiles.remove(proj)
+    for p in players:
+        px, py = level.find(p.spawnIcon)[0]
+        p.reset_state()
+        p.go_to(px, py)
+        p.facing = 1 if p.x < level.width / 2 else -1
+        p.health = training.reset_damage if p is training.dummy else 0
+    Particles.clear()
+    training.combo, training.combo_damage, training.since_hit = 0, 0.0, 999
+
+def training_reset_requested():
+    return Keyboard.pressed("r") or any(p.pad is not None and Gamepad.pressed(p.pad, "back") for p in players)
+
+def training_pause_menu():
+    """Returns resume / reset / select / map / quit."""
+    dim = Box(Screen.width, Screen.height, "black", Screen.width / 2, Screen.height / 2, alpha=170)
+
+    def cycle(options, current, step):
+        return options[(options.index(current) + step) % len(options)] if current in options else options[0]
+
+    def set_behaviour(step):
+        training.behaviour = cycle(DUMMY_BEHAVIOURS, training.behaviour, step)
+        training.dummy.behaviour = training.behaviour
+
+    def set_damage(step):
+        training.reset_damage = cycle(TRAINING_DAMAGES, training.reset_damage, step)
+        training.dummy.health = training.reset_damage
+
+    def toggle_auto(step):
+        training.auto_reset = not training.auto_reset
+
+    items = [Item("Resume", result="resume"), Item("Reset Positions", result="reset")]
+    if training.dummy is not None:
+        for label, value, change in (("Dummy Behaviour", lambda: training.behaviour, set_behaviour),
+                                     ("Dummy Damage", lambda: f"{training.reset_damage}%", set_damage),
+                                     ("Auto-Reset Damage", lambda: "On" if training.auto_reset else "Off", toggle_auto)):
+            items.append(Item(label, value=value, on_left=lambda c=change: c(-1), on_right=lambda c=change: c(1)))
+    items += [Item("Change Fighter", result="select"), Item("Change Map", result="map"), Item("Quit to Menu", result="quit")]
+    result = Menu("Training", items, hint="Left / Right: change     Esc to resume", spacing=56, width=620, back_result="resume").run()
+    dim.delete()
+    return result or "quit"
+
+def start_training(entries, map_index):
+    rules = ms.Rules()
+    rules.mode, rules.stocks, rules.minutes, rules.shield, rules.sudden_death = "Stock", 10, 0, 0, False
+    entries = list(entries)
+    free = next((s for s in range(MAX_PLAYERS) if s not in {e["slot"] for e in entries}), None)
+    training.active, training.dummy = True, None
+    training.combo, training.combo_damage, training.last_hit, training.best, training.since_hit = 0, 0.0, 0.0, 0, 999
+    if free is not None:                                            # (with four humans there's no seat left for the dummy)
+        entries.append({"slot": free, "character": "Dummy", "dummy": True})
+    start_match(entries, rules, map_index)
+    training.hud = [Text("", 0, 0, 28, "white", outline=3) for _ in range(4)]
+    training.hud.append(Text("R / Back: reset     Esc / Start: training menu", Screen.width / 2, 66, 20, (140, 140, 170), outline=1))
+    if training.dummy is not None:
+        training.dummy.behaviour = training.behaviour
+        training.dummy.health = training.reset_damage
+
+def training_update_ui(frame):
+    update_ui(frame)
+    d = training.dummy
+    for p in players:
+        stock_hud[p.slot].text = d.behaviour.upper() if p is d else ""
+    if d is not None:
+        hud[d.slot].text = f"DUMMY  {int(d.health)}%"
+    ui.clock.text.text = "TRAINING"
+    combo_on = training.since_hit <= TRAINING_COMBO_GAP and training.combo > 1
+    lines = (f"HITS  {training.combo}", f"COMBO DAMAGE  {int(training.combo_damage)}",
+             f"LAST HIT  {int(training.last_hit)}", f"BEST COMBO  {training.best} HITS")
+    for i, (t, line) in enumerate(zip(training.hud, lines)):
+        t.text = line
+        t.colour = ms.GOLD if combo_on and i < 2 else "white"
+        t.x, t.y = 18 + t.width / 2, 30 + i * 32
+
+def run_training():
+    """Plays until the player picks something that leaves training. Returns 'select', 'map' or 'quit'."""
+    frame = 0
+    ms.State.frame = 0
+    training_update_ui(0)
+    try:
+        while Screen.running:
+            if pause_requested():
+                choice = training_pause_menu()
+                if choice in ("select", "map", "quit"):
+                    return choice
+                if choice == "reset":
+                    training_reset()
+                Screen.update()         # the button that closed the menu mustn't also jump or attack
+            if training_reset_requested():
+                training_reset()
+            if training.dummy is not None:
+                training.dummy.think(others(training.dummy))
+            step_game(frame, True)
+            frame += 1
+            ms.State.frame = frame
+            training.since_hit += 1
+            if training.auto_reset and training.since_hit == TRAINING_AUTO_RESET and training.dummy is not None:
+                training.dummy.health = training.reset_damage
+            training_update_ui(frame)
+            Screen.update()
+        return "quit"
+    finally:
+        Screen.fps = 60
+        for p in players:
+            p.visible = True
+
+def training_mode():
+    """Fighter -> map -> practice. Returns to the main menu when the player quits."""
+    pick = lambda: character_select(settings, CHARACTERS, min_players=1, title="Training - Choose Your Fighter")
+    entries = pick()
+    step = "map"
+    while entries and Screen.running:
+        if step == "map":
+            picked = ms.map_select(MAPS, ms.records.map_choice)
+            if picked is None:                                      # backed out: pick fighters again
+                entries = pick()
+                continue
+            ms.records.set_map_choice(picked[0])
+            map_index, step = picked[1], "play"
+        start_training(entries, map_index)
+        outcome = run_training()
+        end_match()
+        Screen.background = MENU_BG
+        if outcome == "select":
+            entries, step = pick(), "map"
+        elif outcome == "map":
+            step = "map"
+        else:
+            break
+
 #GAMELOOP
 Screen.background = MENU_BG
 rules = ms.load_rules()
@@ -4706,6 +4910,10 @@ while Screen.running:
     choice = main_menu(settings)
     if choice == "online":
         online_menu(settings, CHARACTERS, MAPS, rules, ONLINE_BUILD, play_online_match)
+        Screen.background = MENU_BG
+        continue
+    if choice == "training":
+        training_mode()
         Screen.background = MENU_BG
         continue
     if choice != "play":

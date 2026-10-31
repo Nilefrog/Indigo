@@ -248,6 +248,7 @@ class Menu:
 
 def main_menu(settings, title="PLATFORM FIGHTER"):
     items = [Item("Play", result="play"),
+             Item("Training", result="training"),
              Item("Online", result="online"),
              Item("Settings", on_confirm=lambda: settings_menu(settings)),
              Item("Quit", result="quit")]
@@ -469,7 +470,7 @@ def pause_menu():
 #   so adding a character to the game adds it to this screen automatically.
 #==========================================================
 
-def character_select(settings, characters):
+def character_select(settings, characters, min_players=2, title="Choose Your Fighter"):
     W, H = Screen.width, Screen.height
     names = list(characters)
     tiles = names + ["Random"]
@@ -487,7 +488,7 @@ def character_select(settings, characters):
         return "Let fate decide." if tile == "Random" else getattr(characters[tile], "blurb", "")
 
     #---------- layout ----------
-    make(Text("Choose Your Fighter", W / 2, 60, 56, WHITE, outline=3))
+    make(Text(title, W / 2, 60, 56, WHITE, outline=3))
     status = make(Text("", W / 2, 118, 26, GREY))
     make(Text("Join / pick: Jump or Light     Back: Heavy or Parry     Controller: A / B     Esc: main menu", W / 2, H - 26, 20, GREY))
 
@@ -549,7 +550,7 @@ def character_select(settings, characters):
         return "Press A on a controller to join"
 
     def all_ready():
-        return len(joined) >= 2 and all(p["locked"] for p in joined.values())
+        return len(joined) >= min_players and all(p["locked"] for p in joined.values())
 
     def move_cursor(p, action):
         i = p["cursor"]
@@ -607,8 +608,9 @@ def character_select(settings, characters):
 
         if all_ready():
             status.text, status.colour = "Everyone is ready! Press Enter, Start, or confirm again to fight", GREEN
-        elif len(joined) < 2:
-            status.text, status.colour = "Join with your keyboard or a controller. At least 2 players needed", GREY
+        elif len(joined) < min_players:
+            need = "At least 2 players needed" if min_players > 1 else "Join to start"
+            status.text, status.colour = f"Join with your keyboard or a controller. {need}", GREY
         else:
             status.text, status.colour = "Waiting for everyone to lock in...", GOLD
 

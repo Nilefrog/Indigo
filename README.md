@@ -9,6 +9,7 @@ Download the latest release from the [Releases](https://github.com/Nilefrog/Indi
 ## Features
 
 - Local and online multiplayer
+- Training mode: practice against a dummy with a combo counter
 - Up to 4 players
 - Keyboard and controller support
 - Customisable controls
