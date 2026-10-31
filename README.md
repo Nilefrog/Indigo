@@ -1,45 +1,67 @@
 # Indigo
 
-A simple platform fighter game in development.
+A simple platform fighter built with Python and Pygame.
 
-## Downloads
+## Download
 
-Pre-compiled files and standalone executables can be found on the [GitHub Releases](https://github.com) page.
+Download the latest release from the [Releases](https://github.com/Nilefrog/Indigo/releases) page.
 
-## Installation
+## Features
 
-To run this project from the source code, you will need Python installed.
+- Local and online multiplayer
+- Up to 4 players
+- Keyboard and controller support
+- Customisable controls
+- Multiple stages
+- Character selection
+- Parrying and combat mechanics
+- Customisable match settings
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com
-   ```
+## Running from Source
 
-2. Change into the project directory:
-   ```bash
-   cd Indigo
-   ```
+Requires Python.
 
-3. Install the dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+Clone the repository:
 
-## Usage
+```bash
+git clone https://github.com/Nilefrog/Indigo.git
+cd Indigo
+```
 
-To launch the primary platform fighter file:
+Install the dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Launch the game:
+
 ```bash
 python Platform_Fighter.py
 ```
 
-To run the multiplayer server components:
+## Online Multiplayer
+
+Indigo supports online multiplayer through hosted lobbies.
+
+You can host a game directly from the Online menu or connect to an existing server.
+
+For dedicated server hosting:
+
 ```bash
 python Server.py
 ```
 
+The server uses port `7777` by default. You can specify a different port:
+
+```bash
+python Server.py 9000
+```
+
 ## Building
 
-If you need to compile the project using PyInstaller:
+Indigo can be compiled using PyInstaller:
+
 ```bash
 pyinstaller Platform_Fighter.spec
 ```
@@ -47,4 +69,3 @@ pyinstaller Platform_Fighter.spec
 ## License
 
 This project is licensed under the MIT License.
-
