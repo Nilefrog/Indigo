@@ -5,7 +5,11 @@ a = Analysis(
     ['Platform_Fighter.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('tiles', 'tiles'),
+        ('sprites', 'sprites'),
+        ('sounds', 'sounds'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
