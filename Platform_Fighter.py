@@ -1148,7 +1148,9 @@ class Ven(Player):
         self.start_attack(BlastBouncer(self))
 
     def rifle_shot(self):
-        self.start_attack(Attack(self, width=1000, height=10, offset=(500, -5), startup=14, active=4, recovery=10,damage=10, knockbackx=13, knockbacky=3, angle=10, stun=14))
+        self.start_attack(Attack(self, width=1000, height=10, offset=(500, -5), startup=14, active=4, recovery=10,
+                                 damage=10, knockbackx=13, knockbacky=3, angle=10, stun=14,
+                                 sprite_name="rifle_shot", sprite_frames=28))
         self.special_ammo -= 1
 
     def throw_stone(self):                # (no longer on any input, side + heavy is the back blast now. Kept in case you want it elsewhere)
