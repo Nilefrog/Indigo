@@ -503,6 +503,15 @@ class Attack(Move):
                 o._costumes = o._load_costumes(self.sprite_name)
                 o.name = self.sprite_name
                 o.costume = 0
+
+            # Movement is locked during an attack, so update the visual facing
+            # directly from horizontal input without changing the hitbox's snapshot.
+            if o.held("left"):
+                o.direction = 270
+            elif o.held("right"):
+                o.direction = 90
+            else:
+                o.direction = 90 if self.facing > 0 else 270
         else:
             self._restore_player_sprite()
 
@@ -993,15 +1002,26 @@ class BlastBouncer(Move):
                 self.end()
 
 class GroundSlam(Move):
-    """Slam straight down. The moment you land, a jab-shaped hit (the same box as Rend's down light) goes off on BOTH sides."""
-    def __init__(self, owner):
+    """Slam straight down. The moment you land, a jab-shaped hit goes off on BOTH sides."""
+    def __init__(self, owner, sprite_name=None):
         super().__init__(owner)
         self.state, self.timer = "slam", 0
         self.fall_frames = 0
+        self.sprite_name = sprite_name
+        self._player_sprite_state = None
         owner.x_velocity = 0
         self.right = self.add_hitbox(Hitbox(owner, 40, 50, (25, -5), damage=7, kbx=10, kby=10, angle=80, stun=14))
         self.left = self.add_hitbox(Hitbox(owner, 40, 50, (-25, -5), damage=7, kbx=10, kby=10, angle=80, stun=14))
         self.left.already_hit = self.right.already_hit        # the same set, so someone standing in the middle is only hit once
+
+    def _restore_player_sprite(self):
+        if self._player_sprite_state is not None:
+            self.owner._costumes, self.owner.name, self.owner.costume = self._player_sprite_state
+            self._player_sprite_state = None
+
+    def cancel(self):
+        self._restore_player_sprite()
+        super().cancel()
 
     def update(self, targets):
         o = self.owner
@@ -1024,6 +1044,22 @@ class GroundSlam(Move):
         elif self.state == "recovery" and self.timer <= 0:
             self.end()
             return
+
+        active_now = self.state == "active"
+        if self.sprite_name and active_now:
+            if self._player_sprite_state is None:
+                self._player_sprite_state = (o._costumes, o.name, o.costume)
+                o._costumes = o._load_costumes(self.sprite_name)
+                o.name = self.sprite_name
+                o.costume = 0
+            if o.held("left"):
+                o.direction = 270
+            elif o.held("right"):
+                o.direction = 90
+            else:
+                o.direction = 90 if self.facing > 0 else 270
+        else:
+            self._restore_player_sprite()
 
         self.right.place(o.x, o.y, 1)          # facing 1 for both: the offsets already put them on opposite sides...
         self.left.place(o.x, o.y, 1)
@@ -1144,7 +1180,7 @@ class Ven(Player):
     #---------------- LIGHT ----------------
 
     def ground_slam(self):                # down + light (in the air): slam down, then a hit on both sides when you land
-        self.start_attack(GroundSlam(self))
+        self.start_attack(GroundSlam(self, sprite_name="ven_volley"))
 
     def Breaker(self):    # down + light (grounded): Close Range High Damage High Stun Attack
         self.start_attack(Attack(self, width=20, height=20, offset=(25, -5), startup=8, active=4, recovery=17,
