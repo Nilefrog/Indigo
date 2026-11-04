@@ -473,7 +473,7 @@ def gravity_scale(player):
     return min([f.scale for f in gravity_fields if f.contains(player)], default=1)
 
 class Projectile: #Player Attack Projectiles
-    def __init__(self, x, y, facing, speed, lifetime, hitbox, pierce=False, angle=0, gravity=0, ignore_tiles=False):
+    def __init__(self, x, y, facing, speed, lifetime, hitbox, pierce=False, angle=0, gravity=0, ignore_tiles=False, sprite_name=None, sprite_size=100):
         self.x, self.y, self.facing = x, y, facing
         self.speed, self.lifetime = speed, lifetime
         self.angle = angle            # degrees away from straight ahead: 0 = forward, 90 = straight up, negative = down
@@ -483,7 +483,11 @@ class Projectile: #Player Attack Projectiles
         self.portal_travel = not ignore_tiles       # Rex's ship ignores portals
         self.hitbox = hitbox
         self.hitbox.projectile = self
-        self.pierce = pierce          # False = disappears on its first hit
+        self.pierce = pierce
+        self.visual = Sprite(sprite_name, x, y, sprite_size) if sprite_name else None
+        if self.visual is not None:
+            self.visual.rotate_mode = "flip"
+            self.visual.direction = 90 if facing > 0 else 270          # False = disappears on its first hit
         hitbox.set_active(True)
         projectiles.append(self)
 
@@ -497,7 +501,9 @@ class Projectile: #Player Attack Projectiles
         self.speed = min(self.speed * 1.5, 24)       # capped so it can't skip over a player
         self.lifetime = max(self.lifetime, 45)
         self.hitbox.owner = parrier
-        self.hitbox.already_hit = {parrier}          # the old owner can be hit again, the parrier can't
+        self.hitbox.already_hit = {parrier}
+        if self.visual is not None:
+            self.visual.direction = 90 if self.facing > 0 else 270          # the old owner can be hit again, the parrier can't
 
     def update(self, targets, tilemap):
         old_x, old_y = self.x, self.y
@@ -509,9 +515,14 @@ class Projectile: #Player Attack Projectiles
             portal_transit(self, old_x, old_y, lambda x, y: not tilemap.is_solid(x, y))
         self.lifetime -= 1
         self.hitbox.place(self.x, self.y, self.facing)
+        if self.visual is not None:
+            self.visual.go_to(self.x, self.y)
+            self.visual.direction = 90 if self.facing > 0 else 270
         landed = self.hitbox.check(targets, self.facing)
         if self.lifetime <= 0 or (not self.ignore_tiles and tilemap.is_solid(self.x, self.y)) or (landed and not self.pierce):
             self.hitbox.delete()
+            if self.visual is not None:
+                self.visual.delete()
             projectiles.remove(self)
 
 
@@ -524,11 +535,13 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
     # What the character select screen shows. Every character overrides these, so a new character just works there.
     title = "Fighter"                 # the name shown on screen
     blurb = ""                        # a short one line description
-    preview = "player"                # which sprite to show (the name of a file in your sprites folder)
+    sprite_name = "player"            # sprite used by this fighter during a match
+    preview = "player"                # sprite used on the character-select screen
     preview_size = 300                # how big to draw it there (a percentage, like Sprite.size)
 
     def __init__(self,currentLevel, name, x=None, y=None, size=100, spawnIcon = "p", controls=None, pad=None, pad_controls=None, slot=None):
-        super().__init__(name, x, y, size)
+        super().__init__(self.sprite_name, x, y, size)
+        self.rotate_mode = "flip"
         self.controls = controls          # a keyboard controls dictionary, or None for no keyboard input
         self.net = None                   # online: a NetInput that replaces the keyboard / controller
         self.pad = pad                    # which controller slot drives this player (0 = first), or None
@@ -980,6 +993,8 @@ class GroundSlam(Move):
 
 class Ven(Player):
 
+    sprite_name = "ven_idle"
+    preview = "ven_idle"
     title = "Ven"
     blurb = "Gunslinger. Rifle shots and ammo-based specials."
 
@@ -1065,7 +1080,7 @@ class Ven(Player):
         def fire(owner):
             for fan in (15, 0, -15):
                 bullet = Hitbox(owner, 12, 12, (0, 0), damage=4, kbx=7, kby=4, angle=15 + fan, stun=8)
-                Projectile(owner.x + 22 * owner.facing, owner.y - 3, owner.facing, speed=14, lifetime=40, hitbox=bullet, angle=fan)
+                Projectile(owner.x + 22 * owner.facing, owner.y - 3, owner.facing, speed=14, lifetime=40, hitbox=bullet, angle=fan, sprite_name="ven_triple_shot")
         self.start_attack(Attack(self, 1, 1, (0, 0), startup=10, active=0, recovery=16,
                                  damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
         self.special_ammo -= 1
@@ -2554,6 +2569,8 @@ class Haymaker(Attack):
 
 class Bombhead(Player):
 
+    sprite_name = "Bombhead"
+    preview = "Bombhead"
     title = "Bombhead"
     blurb = "DEADMAN DANNY (30 seconds to live baby)"
 
@@ -3123,6 +3140,8 @@ class AscendSurge(Move):
 
 class Angellica(Player):
 
+    sprite_name = "Angellica"
+    preview = "Angellica"
     title = "Angellica"
     blurb = "Low gravity angel that uses light as a resource."
 
