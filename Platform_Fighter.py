@@ -435,7 +435,7 @@ class Attack(Move):
     def __init__(self, owner, width, height, offset, startup, active, recovery,
                  damage, knockbackx, knockbacky, angle, stun,
                  mode="angle", on_fire=None, on_connect=None, hitstop=None,
-                 sprite_name=None, pose_sprite_name=None, pose_frames=0):
+                 sprite_name=None, pose_sprite_name=None, pose_frames=0, sprite_frames=None):
         super().__init__(owner)
         self.startup, self.active, self.recovery = startup, active, recovery
         self.total_frames = startup + active + recovery
@@ -443,6 +443,10 @@ class Attack(Move):
         self.on_fire = on_fire
         self.on_connect = on_connect
         self.sprite_name = sprite_name
+        self.sprite_frames = sprite_frames
+        if sprite_frames is not None:
+            # Keep the move alive long enough for the requested visual tail.
+            self.total_frames = max(self.total_frames, sprite_frames)
         self._player_sprite_state = None
         self.pose_sprite_name, self.pose_frames = pose_sprite_name, pose_frames
         self.pose_visual = None
@@ -495,9 +499,13 @@ class Attack(Move):
                 o.visible = self._pose_was_visible
                 self._pose_was_visible = None
 
-        # Swap the player's own image during the active frames (rather than
-        # drawing a separate sprite over the hitbox).
-        if self.sprite_name and active_now:
+        # Swap the player's own image during active frames by default.
+        # sprite_frames optionally keeps the replacement visible for a set
+        # number of frames, including startup/recovery and a short visual tail.
+        sprite_now = (self.sprite_name is not None
+                      and (active_now if self.sprite_frames is None
+                           else self.frame < self.sprite_frames))
+        if sprite_now:
             if self._player_sprite_state is None:
                 self._player_sprite_state = (o._costumes, o.name, o.costume)
                 o._costumes = o._load_costumes(self.sprite_name)
@@ -1003,14 +1011,25 @@ class BlastBouncer(Move):
 
 class GroundSlam(Move):
     """Slam straight down. The moment you land, a jab-shaped hit goes off on BOTH sides."""
-    def __init__(self, owner):
+    def __init__(self, owner, sprite_name=None):
         super().__init__(owner)
         self.state, self.timer = "slam", 0
         self.fall_frames = 0
+        self.sprite_name = sprite_name
+        self._player_sprite_state = None
         owner.x_velocity = 0
         self.right = self.add_hitbox(Hitbox(owner, 40, 50, (25, -5), damage=7, kbx=10, kby=10, angle=80, stun=14))
         self.left = self.add_hitbox(Hitbox(owner, 40, 50, (-25, -5), damage=7, kbx=10, kby=10, angle=80, stun=14))
         self.left.already_hit = self.right.already_hit        # the same set, so someone standing in the middle is only hit once
+
+    def _restore_player_sprite(self):
+        if self._player_sprite_state is not None:
+            self.owner._costumes, self.owner.name, self.owner.costume = self._player_sprite_state
+            self._player_sprite_state = None
+
+    def cancel(self):
+        self._restore_player_sprite()
+        super().cancel()
 
     def update(self, targets):
         o = self.owner
@@ -1033,6 +1052,19 @@ class GroundSlam(Move):
         elif self.state == "recovery" and self.timer <= 0:
             self.end()
             return
+
+        if self.sprite_name:
+            if self._player_sprite_state is None:
+                self._player_sprite_state = (o._costumes, o.name, o.costume)
+                o._costumes = o._load_costumes(self.sprite_name)
+                o.name = self.sprite_name
+                o.costume = 0
+            if o.held("left"):
+                o.direction = 270
+            elif o.held("right"):
+                o.direction = 90
+            else:
+                o.direction = 90 if self.facing > 0 else 270
 
         self.right.place(o.x, o.y, 1)          # facing 1 for both: the offsets already put them on opposite sides...
         self.left.place(o.x, o.y, 1)
@@ -1147,13 +1179,14 @@ class Ven(Player):
                             direction=90 if owner.facing > 0 else 270, spread=40, speed=(4, 9),
                             life=(8, 16), size=(2, 4), gravity=0, drag=0.9)
         self.start_attack(Attack(self, 1, 1, (0, 0), startup=4, active=0, recovery=14,
-                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=launch))
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=launch,
+                                 sprite_name="ven_back_blast", sprite_frames=22))
         self.special_ammo -= 1
 
     #---------------- LIGHT ----------------
 
     def ground_slam(self):                # down + light (in the air): slam down, then a hit on both sides when you land
-        self.start_attack(GroundSlam(self))
+        self.start_attack(GroundSlam(self, sprite_name="ven_ground_slam"))
 
     def Breaker(self):    # down + light (grounded): Close Range High Damage High Stun Attack
         self.start_attack(Attack(self, width=20, height=20, offset=(25, -5), startup=8, active=4, recovery=17,
@@ -1171,7 +1204,7 @@ class Ven(Player):
     def Volley(self):   # up + light: upward blast, launches heavily upward
         self.start_attack(Attack(self, width=70, height=65, offset=(0, -25), startup=4, active=4, recovery=9,
                                  damage=5, knockbackx=5, knockbacky=11, angle=90, stun=12,
-                                 sprite_name="ven_volley"))
+                                 sprite_name="ven_volley", sprite_frames=23))
 
 
 #==========================================================
