@@ -435,28 +435,31 @@ class Attack(Move):
     def __init__(self, owner, width, height, offset, startup, active, recovery,
                  damage, knockbackx, knockbacky, angle, stun,
                  mode="angle", on_fire=None, on_connect=None, hitstop=None,
-                 sprite_name=None, sprite_size=100, pose_sprite_name=None, pose_frames=0):
+                 sprite_name=None, pose_sprite_name=None, pose_frames=0):
         super().__init__(owner)
         self.startup, self.active, self.recovery = startup, active, recovery
         self.total_frames = startup + active + recovery
         self.frame = 0
         self.on_fire = on_fire
         self.on_connect = on_connect
-        self.sprite_name, self.sprite_size = sprite_name, sprite_size
+        self.sprite_name = sprite_name
+        self._player_sprite_state = None
         self.pose_sprite_name, self.pose_frames = pose_sprite_name, pose_frames
         self.pose_visual = None
         self._pose_was_visible = None
-        self.visual = None
         self.hitbox = self.add_hitbox(Hitbox(owner, width, height, offset,
                                              damage, knockbackx, knockbacky, angle, stun, mode, hitstop=hitstop))
 
     def is_active(self):
         return self.startup <= self.frame < self.startup + self.active
 
+    def _restore_player_sprite(self):
+        if self._player_sprite_state is not None:
+            self.owner._costumes, self.owner.name, self.owner.costume = self._player_sprite_state
+            self._player_sprite_state = None
+
     def cancel(self):
-        if self.visual is not None:
-            self.visual.delete()
-            self.visual = None
+        self._restore_player_sprite()
         if self.pose_visual is not None:
             self.pose_visual.delete()
             self.pose_visual = None
@@ -492,17 +495,16 @@ class Attack(Move):
                 o.visible = self._pose_was_visible
                 self._pose_was_visible = None
 
-        # Optional visual attached to the attack hitbox (used by Ven's punch).
+        # Swap the player's own image during the active frames (rather than
+        # drawing a separate sprite over the hitbox).
         if self.sprite_name and active_now:
-            if self.visual is None:
-                self.visual = Sprite(self.sprite_name, o.x, o.y, self.sprite_size)
-                self.visual.rotate_mode = "flip"
-            self.visual.go_to(o.x + self.hitbox.offset[0] * self.facing,
-                              o.y + self.hitbox.offset[1])
-            self.visual.direction = 90 if self.facing > 0 else 270
-        elif self.visual is not None:
-            self.visual.delete()
-            self.visual = None
+            if self._player_sprite_state is None:
+                self._player_sprite_state = (o._costumes, o.name, o.costume)
+                o._costumes = o._load_costumes(self.sprite_name)
+                o.name = self.sprite_name
+                o.costume = 0
+        else:
+            self._restore_player_sprite()
 
         if self.hitbox.check(targets, self.facing) and self.on_connect:
             self.on_connect(o)
