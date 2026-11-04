@@ -4413,6 +4413,8 @@ def end_match():
         player.delete()
     for proj in projectiles[:]:
         proj.hitbox.delete()
+        if proj.visual is not None:
+            proj.visual.delete()
     projectiles.clear()
     for sprite in list(hud.values()) + list(stock_hud.values()) + list(tags.values()) + list(crowns.values()):
         sprite.delete()
