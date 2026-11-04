@@ -435,7 +435,7 @@ class Attack(Move):
     def __init__(self, owner, width, height, offset, startup, active, recovery,
                  damage, knockbackx, knockbacky, angle, stun,
                  mode="angle", on_fire=None, on_connect=None, hitstop=None,
-                 sprite_name=None, sprite_size=100):
+                 sprite_name=None, sprite_size=100, pose_sprite_name=None, pose_frames=0):
         super().__init__(owner)
         self.startup, self.active, self.recovery = startup, active, recovery
         self.total_frames = startup + active + recovery
@@ -443,6 +443,9 @@ class Attack(Move):
         self.on_fire = on_fire
         self.on_connect = on_connect
         self.sprite_name, self.sprite_size = sprite_name, sprite_size
+        self.pose_sprite_name, self.pose_frames = pose_sprite_name, pose_frames
+        self.pose_visual = None
+        self._pose_was_visible = None
         self.visual = None
         self.hitbox = self.add_hitbox(Hitbox(owner, width, height, offset,
                                              damage, knockbackx, knockbacky, angle, stun, mode, hitstop=hitstop))
@@ -454,6 +457,12 @@ class Attack(Move):
         if self.visual is not None:
             self.visual.delete()
             self.visual = None
+        if self.pose_visual is not None:
+            self.pose_visual.delete()
+            self.pose_visual = None
+        if self._pose_was_visible is not None:
+            self.owner.visible = self._pose_was_visible
+            self._pose_was_visible = None
         super().cancel()
 
     def update(self, targets):
@@ -464,6 +473,24 @@ class Attack(Move):
         active_now = self.is_active()
         self.hitbox.set_active(active_now)
         self.hitbox.place(o.x, o.y, self.facing)
+
+        # Optional full-character pose, shown over the player during a move.
+        pose_now = (self.pose_sprite_name is not None
+                    and self.startup <= self.frame < self.startup + self.pose_frames)
+        if pose_now:
+            if self.pose_visual is None:
+                self._pose_was_visible = o.visible
+                self.pose_visual = Sprite(self.pose_sprite_name, o.x, o.y, o.size)
+                self.pose_visual.rotate_mode = "flip"
+            o.visible = False
+            self.pose_visual.go_to(o.x, o.y)
+            self.pose_visual.direction = 90 if self.facing > 0 else 270
+        elif self.pose_visual is not None:
+            self.pose_visual.delete()
+            self.pose_visual = None
+            if self._pose_was_visible is not None:
+                o.visible = self._pose_was_visible
+                self._pose_was_visible = None
 
         # Optional visual attached to the attack hitbox (used by Ven's punch).
         if self.sprite_name and active_now:
@@ -496,7 +523,7 @@ def gravity_scale(player):
     return min([f.scale for f in gravity_fields if f.contains(player)], default=1)
 
 class Projectile: #Player Attack Projectiles
-    def __init__(self, x, y, facing, speed, lifetime, hitbox, pierce=False, angle=0, gravity=0, ignore_tiles=False, sprite_name=None, sprite_size=100):
+    def __init__(self, x, y, facing, speed, lifetime, hitbox, pierce=False, angle=0, gravity=0, ignore_tiles=False):
         self.x, self.y, self.facing = x, y, facing
         self.speed, self.lifetime = speed, lifetime
         self.angle = angle            # degrees away from straight ahead: 0 = forward, 90 = straight up, negative = down
@@ -506,11 +533,7 @@ class Projectile: #Player Attack Projectiles
         self.portal_travel = not ignore_tiles       # Rex's ship ignores portals
         self.hitbox = hitbox
         self.hitbox.projectile = self
-        self.pierce = pierce
-        self.visual = Sprite(sprite_name, x, y, sprite_size) if sprite_name else None
-        if self.visual is not None:
-            self.visual.rotate_mode = "flip"
-            self.visual.direction = 90 if facing > 0 else 270          # False = disappears on its first hit
+        self.pierce = pierce          # False = disappears on its first hit
         hitbox.set_active(True)
         projectiles.append(self)
 
@@ -525,8 +548,7 @@ class Projectile: #Player Attack Projectiles
         self.lifetime = max(self.lifetime, 45)
         self.hitbox.owner = parrier
         self.hitbox.already_hit = {parrier}
-        if self.visual is not None:
-            self.visual.direction = 90 if self.facing > 0 else 270          # the old owner can be hit again, the parrier can't
+          # the old owner can be hit again, the parrier can't
 
     def update(self, targets, tilemap):
         old_x, old_y = self.x, self.y
@@ -538,14 +560,10 @@ class Projectile: #Player Attack Projectiles
             portal_transit(self, old_x, old_y, lambda x, y: not tilemap.is_solid(x, y))
         self.lifetime -= 1
         self.hitbox.place(self.x, self.y, self.facing)
-        if self.visual is not None:
-            self.visual.go_to(self.x, self.y)
-            self.visual.direction = 90 if self.facing > 0 else 270
+
         landed = self.hitbox.check(targets, self.facing)
         if self.lifetime <= 0 or (not self.ignore_tiles and tilemap.is_solid(self.x, self.y)) or (landed and not self.pierce):
             self.hitbox.delete()
-            if self.visual is not None:
-                self.visual.delete()
             projectiles.remove(self)
 
 
@@ -1103,9 +1121,10 @@ class Ven(Player):
         def fire(owner):
             for fan in (15, 0, -15):
                 bullet = Hitbox(owner, 12, 12, (0, 0), damage=4, kbx=7, kby=4, angle=15 + fan, stun=8)
-                Projectile(owner.x + 22 * owner.facing, owner.y - 3, owner.facing, speed=14, lifetime=40, hitbox=bullet, angle=fan, sprite_name="ven_triple_shot")
+                Projectile(owner.x + 22 * owner.facing, owner.y - 3, owner.facing, speed=14, lifetime=40, hitbox=bullet, angle=fan)
         self.start_attack(Attack(self, 1, 1, (0, 0), startup=10, active=0, recovery=16,
-                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire,
+                                 pose_sprite_name="ven_triple_shot", pose_frames=16))
         self.special_ammo -= 1
 
     def back_blast(self):                 # side + heavy: fire behind you and launch yourself the other way, fairly hard and fairly flat
@@ -4437,8 +4456,6 @@ def end_match():
         player.delete()
     for proj in projectiles[:]:
         proj.hitbox.delete()
-        if proj.visual is not None:
-            proj.visual.delete()
     projectiles.clear()
     for sprite in list(hud.values()) + list(stock_hud.values()) + list(tags.values()) + list(crowns.values()):
         sprite.delete()
