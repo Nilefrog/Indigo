@@ -434,26 +434,49 @@ class Attack(Move):
     active=0 gives a move that never hits, handy for throws that only spawn a projectile."""
     def __init__(self, owner, width, height, offset, startup, active, recovery,
                  damage, knockbackx, knockbacky, angle, stun,
-                 mode="angle", on_fire=None, on_connect=None, hitstop=None):
+                 mode="angle", on_fire=None, on_connect=None, hitstop=None,
+                 sprite_name=None, sprite_size=100):
         super().__init__(owner)
         self.startup, self.active, self.recovery = startup, active, recovery
         self.total_frames = startup + active + recovery
         self.frame = 0
         self.on_fire = on_fire
         self.on_connect = on_connect
+        self.sprite_name, self.sprite_size = sprite_name, sprite_size
+        self.visual = None
         self.hitbox = self.add_hitbox(Hitbox(owner, width, height, offset,
                                              damage, knockbackx, knockbacky, angle, stun, mode, hitstop=hitstop))
 
     def is_active(self):
         return self.startup <= self.frame < self.startup + self.active
 
+    def cancel(self):
+        if self.visual is not None:
+            self.visual.delete()
+            self.visual = None
+        super().cancel()
+
     def update(self, targets):
         o = self.owner
         if self.frame == self.startup and self.on_fire:
             self.on_fire(o)
 
-        self.hitbox.set_active(self.is_active())
+        active_now = self.is_active()
+        self.hitbox.set_active(active_now)
         self.hitbox.place(o.x, o.y, self.facing)
+
+        # Optional visual attached to the attack hitbox (used by Ven's punch).
+        if self.sprite_name and active_now:
+            if self.visual is None:
+                self.visual = Sprite(self.sprite_name, o.x, o.y, self.sprite_size)
+                self.visual.rotate_mode = "flip"
+            self.visual.go_to(o.x + self.hitbox.offset[0] * self.facing,
+                              o.y + self.hitbox.offset[1])
+            self.visual.direction = 90 if self.facing > 0 else 270
+        elif self.visual is not None:
+            self.visual.delete()
+            self.visual = None
+
         if self.hitbox.check(targets, self.facing) and self.on_connect:
             self.on_connect(o)
 
@@ -1112,7 +1135,8 @@ class Ven(Player):
 
     def Punch(self):   # neutral + light: Punch the enemy.
         self.start_attack(Attack(self, width=60, height=40, offset=(40, 0), startup=3, active=4, recovery=2,
-                                 damage=3, knockbackx=9, knockbacky=9, angle=25, stun=10))
+                                 damage=3, knockbackx=9, knockbacky=9, angle=25, stun=10,
+                                 sprite_name="ven_punch"))
 
     def Volley(self):   # up + light: upward blast, launches heavily upward
         self.start_attack(Attack(self, width=70, height=65, offset=(0, -25), startup=4, active=4, recovery=9,
