@@ -925,7 +925,8 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
         self.facing = 1 if victim.x >= self.x else -1      # turn to face them before the move snapshots facing
         # Quick to start, very slow to finish (finding the weak point), huge damage, barely any knockback
         self.start_attack(Attack(self, width=90, height=70, offset=(35, 0), startup=3, active=3, recovery=35,
-                                 damage=35, knockbackx=3, knockbacky=3, angle=45, stun=30))
+                                 damage=35, knockbackx=3, knockbacky=3, angle=45, stun=30,
+                                 sprite_name="ven_riposte"))
         return True
 
 #Dummies <3 (theyre gonna get murdered)
@@ -972,16 +973,40 @@ class Dummy(Player):
 #==========================================================
 class BlastBouncer(Move):
     """Shoot Downward, and Launch yourself upward"""
-    def __init__(self, owner):
+    def __init__(self, owner, sprite_name=None):
         super().__init__(owner)
         self.owner = owner
+        self.sprite_name = sprite_name
+        self._player_sprite_state = None
         self.state, self.timer = "startup", 20
         self.fall_frames = 0
         self.rise = self.add_hitbox(Hitbox(owner, 70, 150, (0, 75), damage=7, kbx=5, kby=25, angle=-90, stun=20))
         Sound.play("BlastBouncePrepare")
 
+    def _restore_player_sprite(self):
+        if self._player_sprite_state is not None:
+            self.owner._costumes, self.owner.name, self.owner.costume = self._player_sprite_state
+            self._player_sprite_state = None
+
+    def cancel(self):
+        self._restore_player_sprite()
+        super().cancel()
+
     def update(self, targets):
         o = self.owner
+        if self.sprite_name:
+            if self._player_sprite_state is None:
+                self._player_sprite_state = (o._costumes, o.name, o.costume)
+                o._costumes = o._load_costumes(self.sprite_name)
+                o.name = self.sprite_name
+                o.costume = 0
+            if o.held("left"):
+                o.direction = 270
+            elif o.held("right"):
+                o.direction = 90
+            else:
+                o.direction = 90 if self.facing > 0 else 270
+
         self.timer -= 1
         for hb in self.hitboxes:
             hb.place(o.x, o.y, self.facing)
@@ -1145,7 +1170,7 @@ class Ven(Player):
     #---------------- HEAVY ----------------
 
     def blast_bouncer(self):
-        self.start_attack(BlastBouncer(self))
+        self.start_attack(BlastBouncer(self, sprite_name="ven_blast_bouncer"))
 
     def rifle_shot(self):
         self.start_attack(Attack(self, width=1000, height=10, offset=(500, 300), startup=14, active=4, recovery=10,
@@ -1196,7 +1221,8 @@ class Ven(Player):
 
     def Blast(self):  # side + light: Simple Sideways Hit, Fairly Verical
         self.start_attack(Attack(self, width=45, height=60, offset=(30, 0), startup=3, active=4, recovery=8,
-                                 damage=5, knockbackx=11, knockbacky=7, angle=5, stun=10))
+                                 damage=5, knockbackx=11, knockbacky=7, angle=5, stun=10,
+                                 sprite_name="ven_blast"))
 
     def Punch(self):   # neutral + light: Punch the enemy.
         self.start_attack(Attack(self, width=60, height=40, offset=(40, 0), startup=3, active=4, recovery=2,
