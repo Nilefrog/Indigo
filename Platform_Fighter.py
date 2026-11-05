@@ -1218,7 +1218,7 @@ class Ven(Player):
     def Breaker(self):    # down + light (grounded): Close Range High Damage High Stun Attack
         self.start_attack(Attack(self, width=20, height=20, offset=(25, -5), startup=8, active=4, recovery=17,
                                  damage=20, knockbackx=2, knockbacky=6, angle=80, stun=40,
-                                 sprite_name="ven_breaker"))
+                                 sprite_name="ven_breaker", sprite_frames=29))
 
     def Blast(self):  # side + light: Simple Sideways Hit, Fairly Verical
         self.start_attack(Attack(self, width=45, height=60, offset=(30, 0), startup=3, active=4, recovery=8,
