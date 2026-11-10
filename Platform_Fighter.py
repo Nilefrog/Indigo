@@ -598,6 +598,7 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
     sprite_name = "player"            # sprite used by this fighter during a match
     preview = "player"                # sprite used on the character-select screen
     preview_size = 300                # how big to draw it there (a percentage, like Sprite.size)
+    force_ko = False                  # set by effects that knock a player out directly (Casino's big flip). step_game collects it, respawn clears it
 
     def __init__(self,currentLevel, name, x=None, y=None, size=100, spawnIcon = "p", controls=None, pad=None, pad_controls=None, slot=None):
         super().__init__(self.sprite_name, x, y, size)
@@ -874,6 +875,7 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
         self.y_velocity = 0
         self.dash_charges = self.max_dash_charges
         self.jump_charges = self.max_jump_charges
+        self.force_ko = False
 
     #---------------- getting hit / parrying ----------------
 
@@ -4340,6 +4342,668 @@ class Sion(Player):
                                  damage=6, knockbackx=5, knockbacky=11, angle=90, stun=12))
 
 
+#==========================================================
+# CHARACTER: CASINO - coins, gambles and other people's moves
+#   FloatText   - a word that drifts up and fades (HEADS / TAILS / JACKPOT)
+#   CoinFlip    - down + heavy while the meter isn't full: flip one coin (heads = +1 coin, tails = the meter resets)
+#   BigGamble   - down + heavy with a FULL meter: starts the BigFlip
+#   BigFlip     - the flip that pauses the whole match (see step_game). Heads: pick someone to KO. Tails: Casino is KO'd.
+#   CasinoSlam  - down + light: slam to the floor, then a random hitbox that hugs the ground
+#   CasinoDash  - up + heavy: a delayed dash you can aim any way, leaving a trail. 1 in 10 is a JACKPOT
+#
+#   Everything random uses sim_rng (never random_float), so online matches stay in step.
+#   Neutral + heavy borrows a move from the other characters. It calls THEIR move methods with Casino as `self`,
+#   so the hitboxes belong to Casino. See Casino.wild_card / Casino.__getattr__.
+#==========================================================
+
+CASINO_COINS = 3                       # coins on the meter
+CASINO_GOLD = (255, 205, 60)           # heads
+CASINO_SILVER = (200, 208, 220)        # tails
+CASINO_JACKPOT_ODDS = 10               # the up + heavy dash is a jackpot 1 time in this many
+
+gamble = SimpleNamespace(flip=None)    # the BigFlip that is currently pausing the match, or None
+
+
+class FloatText:
+    """A word that drifts upwards in the world and disappears. Lives in Casino.effects."""
+    def __init__(self, x, y, text, colour, life=45, size=28):
+        self.x, self.y, self.life = x, y, life
+        self.vis = Text(text, x, y, size, colour, outline=3, fixed=False)
+        self.done = False
+
+    def update(self, targets):
+        self.y -= 0.8
+        self.vis.go_to(self.x, self.y)
+        self.life -= 1
+        if self.life <= 0:
+            self.delete()
+
+    def delete(self):
+        if not self.done:
+            self.done = True
+            self.vis.delete()
+
+
+class CoinFlip(Move):
+    """Down + heavy (meter not full). Heads adds a coin to the meter, tails empties it."""
+    STARTUP, RECOVERY = 12, 14
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.frame = 0
+
+    def update(self, targets):
+        o = self.owner
+        self.frame += 1
+        if self.frame == self.STARTUP:
+            if sim_rng.random() < 0.5:
+                o.coins = min(CASINO_COINS, o.coins + 1)
+                o.effects.append(FloatText(o.x, o.y - 30, "HEADS", CASINO_GOLD))
+                Particles.burst(o.x, o.y - 10, count=14, colour=[CASINO_GOLD, (255, 240, 170)], speed=(2, 5),
+                                life=(12, 24), size=(2, 4), gravity=0.05)
+            else:
+                o.coins = 0
+                o.effects.append(FloatText(o.x, o.y - 30, "TAILS", CASINO_SILVER))
+                Particles.burst(o.x, o.y - 10, count=14, colour=[CASINO_SILVER, (120, 125, 135)], speed=(2, 5),
+                                life=(12, 24), size=(2, 4), gravity=0.2)
+        if self.frame >= self.STARTUP + self.RECOVERY:
+            self.end()
+
+
+class BigGamble(Move):
+    """Down + heavy with a full meter: a short wind-up, then the whole match stops for the BigFlip."""
+    STARTUP = 16
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.frame = 0
+
+    def update(self, targets):
+        self.frame += 1
+        if self.frame == self.STARTUP:
+            gamble.flip = BigFlip(self.owner)
+            self.end(recovery=20)
+
+
+class BigFlip:
+    """A giant coin in the middle of the screen. While it exists, step_game does nothing else (the match is paused).
+        flip -> the coin spins (the result was already decided with sim_rng the moment this was made)
+        show -> HEADS / TAILS is announced
+        pick -> heads only: Casino chooses who dies. Left / right changes the choice, light or heavy confirms.
+                (If Casino dithers, a random enemy is chosen, so nobody can stall an online match forever.)
+    Tails: Casino is knocked out. Either way the coin meter empties afterwards."""
+    SIZE = 220
+    FLIP_FRAMES = 110
+    SHOW_FRAMES = 50
+    PICK_FRAMES = 600
+    EDGE = (150, 100, 10)
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.heads = sim_rng.random() < 0.5
+        self.half_turns = 10 if self.heads else 11          # an even number of half turns lands on heads
+        self.phase, self.t = "flip", 0
+        self.index = 0
+        self.done = False
+        cx, cy = Screen.width / 2, Screen.height / 2
+        self.cx, self.cy = cx, cy
+        self.dim = Box(Screen.width, Screen.height, "black", cx, cy, alpha=150)
+        self.coin = Box(self.SIZE, self.SIZE, CASINO_GOLD, cx, cy, border=10, border_colour=self.EDGE, radius=self.SIZE / 2)
+        self.mark = Text("H", cx, cy, 150, self.EDGE, bold=True)
+        self.title = Text("ALL IN", cx, 80, 72, CASINO_GOLD, outline=4)
+        self.sub = Text("", cx, Screen.height - 90, 34, "white", outline=3)
+        self.ring = None
+        Sound.play("Heavy Hitter")
+
+    def update(self):
+        o = self.owner
+        self.t += 1
+
+        if self.phase == "flip":
+            p = min(1, self.t / self.FLIP_FRAMES)
+            ease = 1 - (1 - p) ** 2                          # fast at first, slowing as it lands
+            c = math.cos(math.pi * self.half_turns * ease)
+            self.coin.width = max(6, self.SIZE * abs(c))
+            self.coin.colour = CASINO_GOLD if c >= 0 else CASINO_SILVER
+            self.mark.text = "H" if c >= 0 else "T"
+            self.mark.visible = self.coin.width > 60
+            y = self.cy - 150 * math.sin(math.pi * p)        # up and back down
+            self.coin.go_to(self.cx, y)
+            self.mark.go_to(self.cx, y)
+            self.sub.text = "FLIPPING..."
+            if self.t >= self.FLIP_FRAMES:
+                self.phase, self.t = "show", 0
+                self.title.text = "HEADS!" if self.heads else "TAILS!"
+                self.title.colour = CASINO_GOLD if self.heads else (230, 70, 70)
+                self.sub.text = "Pick someone to KO" if self.heads else "Casino loses"
+                Particles.burst(self.cx, self.cy, count=40, colour=[CASINO_GOLD, (255, 240, 170)] if self.heads else [CASINO_SILVER, (230, 70, 70)],
+                                speed=(3, 9), life=(20, 45), size=(3, 6), gravity=0.1, fixed=True)
+
+        elif self.phase == "show":
+            if self.t >= self.SHOW_FRAMES:
+                if not self.heads:
+                    self._finish(kill=o)
+                    return
+                if not [p for p in players if p is not o]:   # nobody to pick
+                    self._finish()
+                    return
+                self.phase, self.t = "pick", 0
+                self.dim.alpha = 50                          # let the players be seen
+                self.coin.visible = self.mark.visible = False
+                self.title.text = "PICK A VICTIM"
+                self.ring = Box(64, 64, CASINO_GOLD, 0, 0, alpha=60, border=4, border_colour=CASINO_GOLD, radius=8, fixed=False)
+
+        elif self.phase == "pick":
+            foes = [p for p in players if p is not o]
+            if not foes:
+                self._finish()
+                return
+            self.index %= len(foes)
+            if o.pressed("left"):
+                self.index = (self.index - 1) % len(foes)
+            if o.pressed("right"):
+                self.index = (self.index + 1) % len(foes)
+            victim = foes[self.index]
+            self.ring.go_to(victim.x, victim.y)
+            left = max(0, math.ceil((self.PICK_FRAMES - self.t) / 60))
+            self.sub.text = f"P{victim.slot + 1}      LEFT / RIGHT: choose     LIGHT or HEAVY: confirm     ({left}s)"
+            if o.pressed("light") or o.pressed("heavy"):
+                self._finish(kill=victim)
+            elif self.t >= self.PICK_FRAMES:
+                self._finish(kill=foes[sim_rng.randrange(len(foes))])
+
+    def _finish(self, kill=None):
+        o = self.owner
+        o.coins = 0
+        if kill is not None:
+            kill.force_ko = True                             # step_game knocks them out this same frame
+            if kill is not o and getattr(kill, "stats", None) is not None and getattr(o, "stats", None) is not None:
+                kill.stats.last_attacker = o.stats           # so Casino gets the kill credit
+                kill.stats.last_attacker_frame = ms.State.frame
+            Particles.burst(kill.x, kill.y, count=40, colour=[CASINO_GOLD, (255, 255, 255)], speed=(3, 10),
+                            life=(20, 40), size=(3, 6), gravity=0.1)
+            o.effects.append(FloatText(kill.x, kill.y - 30, "BUSTED", (230, 70, 70), life=70, size=34))
+        self.delete()
+
+    def delete(self):
+        if self.done:
+            return
+        self.done = True
+        for sprite in (self.dim, self.coin, self.mark, self.title, self.sub, self.ring):
+            if sprite is not None:
+                sprite.delete()
+        if gamble.flip is self:
+            gamble.flip = None
+
+
+class CasinoSlam(Move):
+    """Down + light: slam down to the floor (if airborne), then a hitbox of random size appears, generally flat and low."""
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.fall_frames = 0
+        grounded = owner.coyote_time == COYOTE_TIME
+        self.state, self.timer = ("startup", 6) if grounded else ("slam", 0)
+        if not grounded:
+            owner.x_velocity = 0
+        width = sim_rng.randint(50, 170)
+        height = int(14 + 56 * sim_rng.random() ** 2.5)      # squared-ish towards 0, so mostly low and sometimes tall
+        ox = sim_rng.randint(-20, 60)
+        self.hitbox = self.add_hitbox(Hitbox(owner, width, height, (ox, 12 - height / 2), damage=6, kbx=8, kby=10,
+                                             angle=65, stun=14, colour=CASINO_GOLD))
+
+    def update(self, targets):
+        o = self.owner
+        if self.state == "slam":
+            self.fall_frames += 1
+            o.y_velocity = 16
+            if o.coyote_time == COYOTE_TIME or self.fall_frames > 120:     # landed (or safety timeout)
+                self.state, self.timer = "startup", 6
+            return
+
+        self.timer -= 1
+        if self.state == "startup" and self.timer <= 0:
+            self.state, self.timer = "active", 5
+            self.hitbox.set_active(True)
+        elif self.state == "active" and self.timer <= 0:
+            self.state, self.timer = "recovery", 14
+            self.hitbox.set_active(False)
+        elif self.state == "recovery" and self.timer <= 0:
+            self.end()
+            return
+        self.hitbox.place(o.x, o.y, self.facing)
+        self.hitbox.check(targets, self.facing)
+
+
+class CasinoDash(Move):
+    """Up + heavy. A delay while a hitbox forms around Casino, then he dashes the way you are holding when it goes off
+    (hold nothing = straight up, any of the 8 directions works, so release up and hold down to dive).
+    1 in 10 dashes is a JACKPOT: faster, further, much stronger. The dash leaves a trail of lingering hitboxes behind."""
+    DELAY = 14
+    TRAIL_LIFE = 12
+    RECOVERY = 12
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.frame = 0
+        self.state = "delay"
+        self.dir = (0, -1)
+        self.jackpot = False
+        self.speed, self.dash_frames = 15, 12
+        self.hit_facing = 1
+        self.timer = 0
+        self.body = self.add_hitbox(Hitbox(owner, 56, 56, (0, 0), damage=9, kbx=12, kby=12, angle=45, stun=16, colour=CASINO_GOLD))
+        self.trail = []                                       # [hitbox, frames left]
+
+    def _aim(self):
+        o = self.owner
+        dx = (1 if o.held("right") else 0) - (1 if o.held("left") else 0)
+        dy = (1 if o.held("down") else 0) - (1 if o.held("up") else 0)
+        if dx == 0 and dy == 0:
+            return 0.0, -1.0                                  # no input: straight up
+        length = math.hypot(dx, dy)
+        return dx / length, dy / length
+
+    def _launch(self):
+        o = self.owner
+        self.dir = self._aim()
+        dx, dy = self.dir
+        self.jackpot = sim_rng.randrange(CASINO_JACKPOT_ODDS) == 0
+        if self.jackpot:
+            self.speed, self.dash_frames = 28, 16
+            self.body.damage, self.body.kbx, self.body.kby, self.body.stun = 22, 26, 26, 30
+            o.effects.append(FloatText(o.x, o.y - 34, "JACKPOT!", CASINO_GOLD, life=70, size=36))
+            Particles.burst(o.x, o.y, count=40, colour=[CASINO_GOLD, (255, 255, 255)], speed=(3, 10),
+                            life=(15, 35), size=(3, 6), gravity=0, drag=0.95)
+        self.hit_facing = 1 if dx >= 0 else -1
+        self.body.angle = math.degrees(math.atan2(-dy, abs(dx)))     # knock them the way he's travelling
+        self.state, self.timer = "dash", self.dash_frames
+        self.body.set_active(True)
+        o.NoGravTimer = 2
+
+    def _drop_trail(self):
+        o = self.owner
+        power = 2 if self.jackpot else 1
+        box = self.add_hitbox(Hitbox(o, 44, 44, (0, 0), damage=4 * power, kbx=5 * power, kby=6 * power, angle=60,
+                                     stun=10, mode="radial", colour=CASINO_GOLD))
+        box.place(o.x, o.y, 1)
+        box.set_active(True)
+        self.trail.append([box, self.TRAIL_LIFE])
+
+    def _tick_trail(self, targets):
+        for entry in self.trail[:]:
+            box, life = entry
+            box.check(targets, 1)
+            entry[1] -= 1
+            if entry[1] <= 0:
+                box.delete()
+                self.trail.remove(entry)
+
+    def update(self, targets):
+        o = self.owner
+        self.frame += 1
+
+        if self.state == "delay":
+            o.x_velocity = 0
+            o.y_velocity = 0
+            o.NoGravTimer = 2
+            self.body.place(o.x, o.y, 1)
+            Particles.burst(o.x, o.y, count=1, colour=CASINO_GOLD, speed=(1, 2), life=(6, 10), size=(2, 3), gravity=0)
+            if self.frame >= self.DELAY:
+                self._launch()
+
+        elif self.state == "dash":
+            dx, dy = self.dir
+            o.x_velocity = dx * self.speed
+            o.y_velocity = dy * self.speed
+            o.NoGravTimer = 2
+            self.body.place(o.x, o.y, 1)
+            self.body.check(targets, self.hit_facing)
+            if self.cancelled:                                # parried mid-dash
+                return
+            if self.timer % 2 == 0:
+                self._drop_trail()
+            self.timer -= 1
+            if self.timer <= 0:
+                self.body.set_active(False)
+                o.x_velocity *= 0.3
+                o.y_velocity *= 0.3
+                o.NoGravTimer = 0
+                self.state, self.timer = "recovery", self.RECOVERY
+
+        elif self.state == "recovery":
+            self.timer -= 1
+            if self.timer <= 0:
+                self._tick_trail(targets)
+                self.end()
+                return
+
+        self._tick_trail(targets)
+
+
+class Casino(Player):
+
+    sprite_name = "Casino"
+    preview = "Casino"
+    title = "Casino"
+    blurb = "Gambler. Everything is a coin flip. Win big or die trying."
+
+    BAR_SPACING = 30
+
+    # Sion's moves hide and show the fighter and scale damage, so Casino answers to the same names when he borrows them
+    vanished = False
+    _shown = True
+
+    @property
+    def visible(self):
+        return self._shown and not self.vanished
+
+    @visible.setter
+    def visible(self, value):
+        self._shown = value
+
+    @property
+    def power(self):                          # read by Hitbox.hit: multiplies everything he deals (only changes if he borrows Pain Trade)
+        return 1 + self.pain * SION_POWER_PER_PAIN
+
+    def __init__(self, currentLevel, name, x=None, y=None, size=100, spawnIcon="p", controls=None, pad=None, pad_controls=None, slot=None):
+        super().__init__(currentLevel, name, x, y, size, spawnIcon, controls, pad, pad_controls, slot)
+        self.coins = 0                        # the coin meter (0 - 3)
+        self.effects = []
+        self.hud_tick = 0
+        self.tick = 0
+        # ---- state the borrowed moves expect to find on their owner ----
+        self.special_ammo = Ven.MAX_AMMO
+        self.stored_charge = 0
+        self.trash = 0
+        self.no_trash_timer = 0
+        self.deny_timer = 0
+        self.up_blasts = Bombhead.MAX_UP_BLASTS
+        self.exploded = False
+        self.light = Angellica.MAX_LIGHT
+        self.surges = Angellica.MAX_SURGES
+        self.regain_lock = 0
+        self.field = None
+        self.lifts = Watcher.MAX_LIFTS
+        self.portal_cd = [0, 0]
+        self.pain = 0
+        self.heal_left = SION_HEAL_BUDGET
+        self.rises = SION_MAX_RISES
+        self._barrel = None                   # Rex's barrel and Watcher's portals only exist once one of their moves has been borrowed
+        self._portals = None
+
+    #---------------- borrowing other characters' moves ----------------
+
+    BORROW_FROM = (Ven, Rend, CleaningLady, CaptnRex, Bombhead, Angellica, Watcher, Sion)
+
+    def __getattr__(self, name):
+        # Only called when normal lookup fails. A borrowed move's helpers (Cleaning Lady's spray, Angellica's spend, Sion's hold_still...)
+        # (and their constants, like TRASH_MAX) live on the other character's class, so find them there and bind them to Casino. Lookups are by name, and the names
+        # that are shared between characters (slash, throw_stone) are only ever called through the move tables, never through here.
+        if not name.startswith("__"):
+            for cls in self.BORROW_FROM:
+                if name in cls.__dict__:
+                    attr = cls.__dict__[name]
+                    return attr.__get__(self, type(self)) if hasattr(attr, "__get__") else attr      # methods get bound, constants (TRASH_MAX...) are returned as they are
+        raise AttributeError(f"'Casino' object has no attribute '{name}'")
+
+    @property
+    def barrel(self):                         # Rex's barrel, made the first time a barrel move is borrowed
+        if self._barrel is None:
+            spots = level.find("b")
+            bx, by = spots[0] if spots else (self.x, self.y)
+            self._barrel = Barrel(self, bx, by)
+        return self._barrel
+
+    @property
+    def portals(self):                        # the Watcher's portal pair, made the first time one is borrowed
+        if self._portals is None:
+            self._portals = PortalSet(self)
+            portal_sets.append(self._portals)
+        return self._portals
+
+    def _stock_up(self):
+        """Borrowed moves cost ammo / light / trash / charges for their real owners. Casino pays none of it."""
+        self.special_ammo = Ven.MAX_AMMO
+        self.up_blasts = Bombhead.MAX_UP_BLASTS
+        self.light = Angellica.MAX_LIGHT
+        self.surges = Angellica.MAX_SURGES
+        self.trash = CleaningLady.TRASH_MAX
+        self.lifts = Watcher.MAX_LIFTS
+        self.rises = SION_MAX_RISES
+        self.portal_cd = [0, 0]
+        self.deny_timer = 0
+
+    def _borrowed_moves(self):
+        g = self.coyote_time == COYOTE_TIME
+        moves = [
+            # Ven
+            (Ven, "triple_shot", {}), (Ven, "rifle_shot", {}), (Ven, "blast_bouncer", {}), (Ven, "back_blast", {}),
+            (Ven, "Punch", {}), (Ven, "Volley", {}), (Ven, "Breaker", {}), (Ven, "ground_slam", {}), (Ven, "Blast", {}),
+            # Rend
+            (Rend, "consume", {}), (Rend, "frenzy_dive", {}), (Rend, "pierce", {"aerial": not g}), (Rend, "throw_stone", {}),
+            (Rend, "stab", {}), (Rend, "poke", {}), (Rend, "jab", {}), (Rend, "pogo", {}), (Rend, "slash", {}),
+            # Cleaning Lady
+            (CleaningLady, "squirt", {}), (CleaningLady, "pole_grapple", {}), (CleaningLady, "trash_bag", {}), (CleaningLady, "lunge", {}),
+            (CleaningLady, "sweep_dash", {}), (CleaningLady, "pole_up", {}), (CleaningLady, "soap", {}),
+            (CleaningLady, "stick_down", {}), (CleaningLady, "pole_side", {}),
+            # Cap'n Rex
+            (CaptnRex, "barrel_jump", {}), (CaptnRex, "barrel_dash", {}), (CaptnRex, "barrel_slam", {}), (CaptnRex, "ship", {}),
+            (CaptnRex, "lunge_grab", {}), (CaptnRex, "cutlass_up", {}), (CaptnRex, "tentacles", {}),
+            (CaptnRex, "cutlass_down", {}), (CaptnRex, "blade_wave", {}),
+            # Bombhead (self_destruct is handled by _fuse_blast)
+            (Bombhead, "haymaker", {}), (Bombhead, "blast_launch", {}), (Bombhead, "drop_bomb", {}), (Bombhead, "shell", {}),
+            (Bombhead, "throw_bomb", {}), (Bombhead, "upswing", {}), (Bombhead, "slide_kick", {"aerial": not g}),
+            (Bombhead, "bomb_dash", {}),
+            (Bombhead, "self_destruct", {}),
+            # Angellica
+            (Angellica, "gravity_zone", {}), (Angellica, "ascend", {}), (Angellica, "light_pillar", {}), (Angellica, "starball", {}),
+            (Angellica, "orbs", {}), (Angellica, "column", {}), (Angellica, "wings", {}), (Angellica, "grab_slam", {}),
+            # The Watcher
+            (Watcher, "portal_one", {}), (Watcher, "tentacle_lift", {}), (Watcher, "portal_two", {}), (Watcher, "tentacle_ball", {}),
+            (Watcher, "floor_tentacle", {}), (Watcher, "big_swipe", {}), (Watcher, "sky_tentacle", {}), (Watcher, "tentacle_barrage", {}),
+            # Sion
+            (Sion, "pain_trade", {}), (Sion, "shadow_rise", {}), (Sion, "blood_fountain", {}), (Sion, "bat_teleport", {}),
+            (Sion, "hook_slash", {}), (Sion, "upper_slice", {}), (Sion, "low_slice", {}), (Sion, "slash", {}),
+            # Casino's own other moves
+            (Casino, "coin_throw", {}), (Casino, "wide_roll", {}), (Casino, "high_roll", {}), (Casino, "low_roll", {}),
+            (Casino, "wild_punch", {}), (Casino, "coin_dash", {}),
+        ]
+        if self._barrel is not None and self._barrel.held:        # throwing a barrel he isn't holding would do nothing
+            moves.append((CaptnRex, "throw_barrel", {}))
+        return moves
+
+    def _fuse_blast(self):
+        """Bombhead's self destruct, on a short fuse: a huge explosion hurts everyone nearby, and Casino goes up with it."""
+        def fire(owner):
+            owner.self_destruct()
+        self.start_attack(Attack(self, 1, 1, (0, 0), startup=24, active=0, recovery=30,
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
+        Particles.burst(self.x, self.y - 14, count=12, colour=[(120, 120, 120), (255, 150, 40)],
+                        speed=(1, 3), life=(10, 20), size=(2, 4), gravity=-0.05)
+
+    @staticmethod
+    def _plain_costume(move):
+        """Other characters' moves swap in their own character's sprites while they play. Casino keeps his own look."""
+        if hasattr(move, "sprite_name"):
+            move.sprite_name = None
+        if hasattr(move, "pose_sprite_name"):
+            move.pose_sprite_name = None
+
+    #---------------- passive: the coin meter ----------------
+
+    def on_hit(self):
+        super().on_hit()
+        if self._barrel is not None:
+            self._barrel.drop()                                  # knocked out of his hands
+        self.clear_orbs()                                        # (Angellica's) orbs that haven't fired pop when he's hit
+
+    def reset_state(self):
+        self.vanished = False
+        self.coins = 0
+        self.special_ammo = Ven.MAX_AMMO
+        self.stored_charge = 0
+        self.trash = 0
+        self.no_trash_timer = 0
+        self.up_blasts = Bombhead.MAX_UP_BLASTS
+        self.exploded = False
+        self.light = Angellica.MAX_LIGHT
+        self.surges = Angellica.MAX_SURGES
+        self.regain_lock = 0
+        self.lifts = Watcher.MAX_LIFTS
+        self.portal_cd = [0, 0]
+        self.pain = 0
+        self.heal_left = SION_HEAL_BUDGET
+        self.rises = SION_MAX_RISES
+        self.max_jump_charges = 1                                # before super(), which refills jumps up to this
+        self.clear_orbs()
+        if self._barrel is not None:
+            self._barrel.drop()
+        if self._portals is not None:
+            self._portals.clear()
+        super().reset_state()
+
+    def should_die(self):
+        return self.exploded                                     # Bombhead's self destruct (the BigFlip uses force_ko instead)
+
+    def update_attack(self, targets):
+        super().update_attack(targets)
+        self.tick += 1
+        if self._barrel is not None:
+            self._barrel.update(targets)
+        if self._portals is not None and self.tick % 10 == 0:
+            self._portals.ambient()
+        for effect in self.effects[:]:
+            effect.update(targets)
+            if effect.done:
+                self.effects.remove(effect)
+
+    def cleanup(self):
+        for effect in self.effects:
+            effect.delete()
+        self.effects.clear()
+        if self._barrel is not None:
+            self._barrel.delete()
+            self._barrel = None
+        if self._portals is not None:
+            self._portals.clear()
+            if self._portals in portal_sets:
+                portal_sets.remove(self._portals)
+            self._portals = None
+        self.vanished = False
+        if gamble.flip is not None and gamble.flip.owner is self:
+            gamble.flip.delete()
+
+    #---------------- HUD ----------------
+
+    def make_hud(self, x, y):             # three coins
+        self.coin_icons = [Box(22, 22, CASINO_GOLD, x + (i - 1) * self.BAR_SPACING, y, border=3,
+                               border_colour=BigFlip.EDGE, radius=11) for i in range(CASINO_COINS)]
+        self.label = Text("COINS", x, y - 17, 16, PLAYER_COLOURS[self.slot], outline=2)
+        self.hud_sprites = self.coin_icons + [self.label]
+
+    def update_hud(self):
+        self.hud_tick += 1
+        full = self.coins >= CASINO_COINS
+        for i, icon in enumerate(self.coin_icons):
+            if i < self.coins:
+                icon.alpha = 255 if not full or (self.hud_tick // 8) % 2 else 160     # pulses when the meter is full
+            else:
+                icon.alpha = 40
+        self.label.text = "FULL!  DOWN + HEAVY" if full else "COINS"
+
+    #---------------- input ----------------
+
+    def attackChecks(self, targets=()):
+        if not self.actionable:
+            return
+
+        heavy = self.pressed("heavy")
+        light = self.pressed("light")
+        if not (heavy or light):
+            return
+
+        down = self.held("down")
+        side = self.held("left") or self.held("right")
+        up = self.held("up")
+
+        if heavy:
+            if down:
+                self.coin_toss()
+            elif up:
+                self.coin_dash()
+            elif side:
+                self.wild_punch()
+            else:
+                self.wild_card()
+        else:
+            if down:
+                self.low_roll()
+            elif up:
+                self.high_roll()
+            elif side:
+                self.wide_roll()
+            else:
+                # Neutral light: riposte if someone nearby was just parried, otherwise throw a coin
+                if not self.try_riposte(targets):
+                    self.coin_throw()
+
+    #---------------- HEAVY ----------------
+
+    def coin_toss(self):      # down + heavy: flip a coin for the meter. With a FULL meter: pause the match for the big flip instead
+        if self.coins >= CASINO_COINS:
+            self.start_attack(BigGamble(self))
+        else:
+            self.start_attack(CoinFlip(self))
+
+    def wild_card(self):      # neutral + heavy: a random move from any character (Casino's own, apart from this one, included)
+        self._stock_up()
+        pool = self._borrowed_moves()
+        for _ in range(12):                                       # some moves refuse (no barrel to jump...), so draw again
+            cls, name, kwargs = pool[sim_rng.randrange(len(pool))]
+            if name == "self_destruct":
+                self._fuse_blast()
+            else:
+                getattr(cls, name)(self, **kwargs)
+            if self.current_attack is not None:
+                self._plain_costume(self.current_attack)
+                return
+
+    def wild_punch(self):     # side + heavy: a heavy sideways punch with a random hesitation AND a random wind-up
+        delay = sim_rng.randint(0, 30)
+        windup = sim_rng.randint(6, 40)
+        self.start_attack(Attack(self, width=70, height=46, offset=(46, 0), startup=delay + windup, active=5, recovery=24,
+                                 damage=20, knockbackx=22, knockbacky=7, angle=15, stun=22))
+
+    def coin_dash(self):      # up + heavy: delayed, aimable dash with a trail (see CasinoDash)
+        self.start_attack(CasinoDash(self))
+
+    #---------------- LIGHT ----------------
+
+    def coin_throw(self):     # neutral + light: a coin that knocks forward half the time and backward the other half
+        def fire(owner):
+            forward = sim_rng.random() < 0.5
+            coin = Hitbox(owner, 14, 14, (0, 0), damage=4, kbx=8, kby=5, angle=25 if forward else 155, stun=10,
+                          colour=CASINO_GOLD if forward else CASINO_SILVER)       # gold = forward, silver = backward
+            Projectile(owner.x + 20 * owner.facing, owner.y - 2, owner.facing, speed=15, lifetime=32, hitbox=coin)
+        self.start_attack(Attack(self, 1, 1, (0, 0), startup=7, active=0, recovery=12,
+                                 damage=0, knockbackx=0, knockbacky=0, angle=0, stun=0, on_fire=fire))
+
+    def wide_roll(self):      # side + light: a hit to the side with a random length and height
+        w = sim_rng.randint(30, 150)
+        h = sim_rng.randint(14, 80)
+        self.start_attack(Attack(self, width=w, height=h, offset=(w / 2 + 8, sim_rng.randint(-10, 10)), startup=4, active=4, recovery=8,
+                                 damage=5, knockbackx=10, knockbacky=6, angle=25, stun=10))
+
+    def high_roll(self):      # up + light: the same, but biased to be tall rather than wide
+        w = sim_rng.randint(20, 70)
+        h = sim_rng.randint(70, 190)
+        self.start_attack(Attack(self, width=w, height=h, offset=(sim_rng.randint(-8, 8), 10 - h / 2), startup=4, active=4, recovery=9,
+                                 damage=5, knockbackx=4, knockbacky=11, angle=80, stun=12))
+
+    def low_roll(self):       # down + light: slam to the ground, then a random hitbox close to the floor
+        self.start_attack(CasinoSlam(self))
+
+
 #All character list
 
 CHARACTERS = {
@@ -4350,7 +5014,8 @@ CHARACTERS = {
     "Bombhead": Bombhead,
     "Angellica": Angellica,
     "The Watcher" : Watcher,
-    "Sion": Sion
+    "Sion": Sion,
+    "Casino": Casino
 }
 
 #==========================================================
@@ -4523,6 +5188,8 @@ def start_match(entries, rules, map_index=0, online=None):
 def end_match():
     """Throws the whole fight away so the menus (and the next fight) start clean."""
     global level, players, hud, stock_hud, tags, crowns, camera_zone
+    if gamble.flip is not None:         # a big flip was still on screen when the match ended
+        gamble.flip.delete()
     for player in players:
         player.cancel_attack()
         player.cleanup()
@@ -4653,20 +5320,23 @@ def build_result(frame):
 
 def step_game(frame, fighting):
     """One frame of the actual fight."""
-    for p in players:
-        before = (p.x, p.y)
-        p.handle_movement(level)
-        portal_transit(p, before[0], before[1], lambda x, y, p=p: player_fits(p, x, y))
+    if gamble.flip is not None:         # Casino's big flip: the whole match is paused while it plays out
+        gamble.flip.update()
+    else:
+        for p in players:
+            before = (p.x, p.y)
+            p.handle_movement(level)
+            portal_transit(p, before[0], before[1], lambda x, y, p=p: player_fits(p, x, y))
 
-    for p in players:                   # everyone decides their attack first
-        p.attackChecks(others(p))
-    for p in players:                   # then every move advances, so its fair (looking at you tristan)
-        p.update_attack(others(p))
+        for p in players:                   # everyone decides their attack first
+            p.attackChecks(others(p))
+        for p in players:                   # then every move advances, so its fair (looking at you tristan)
+            p.update_attack(others(p))
 
-    for proj in projectiles[:]:         # copy, since update() removes finished projectiles
-        proj.update([p for p in players if p is not proj.owner], level)
+        for proj in projectiles[:]:         # copy, since update() removes finished projectiles
+            proj.update([p for p in players if p is not proj.owner], level)
 
-    ko_list = [p for p in players if p.should_die() or level.touching(p, "Z") or level.touching(p, "Q")]  #TODO: Death Code #ALSO "Q" is used so that the Capt'n barrel isnt killed by the top blastzone
+    ko_list = [p for p in players if p.should_die() or p.force_ko or level.touching(p, "Z") or level.touching(p, "Q")]  #TODO: Death Code #ALSO "Q" is used so that the Capt'n barrel isnt killed by the top blastzone
     if match.finishing:                 # the match is already decided: just put people back, no stats
         for p in ko_list:
             respawn(p)

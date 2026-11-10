@@ -1,6 +1,6 @@
 # Indigo – Characters
 
-Indigo has eight playable characters, each with a different moveset and set of mechanics.
+Indigo has nine playable characters, each with a different moveset and set of mechanics.
 
 ## General Gameplay
 
@@ -266,6 +266,37 @@ Some characters have exceptions to the shared movement rules. These are listed b
 | Up | **Shadow Rise** – Creates a hitbox above Sion, then teleports him upwards into it. |
 | Down | **Blood Fountain** – Sends six blood drops upwards before they rain back down. |
 | Side | **Bat Teleport** – Vanishes and reappears ahead, with three bats attacking along the route. |
+
+---
+
+## Casino
+
+*Gambler. Everything is a coin flip.*
+
+### Passives & Extras
+
+- Has a **Coin Meter** of three coins, shown in his HUD.
+- Down Heavy flips a coin. **Heads** adds a coin to the meter. **Tails** resets the meter to zero.
+- With a full meter, Down Heavy instead pauses the whole match for a **Big Flip**. **Heads:** Casino picks an enemy to KO (left/right to choose, Light or Heavy to confirm; if he takes too long, a random enemy is chosen). **Tails:** Casino is KO'd. The meter resets either way.
+- The meter also resets when Casino respawns.
+
+### Light
+
+| Direction | Move |
+|---|---|
+| Neutral | **Coin Throw** – Throws a coin that knocks the opponent forward half the time and backward the other half (gold coin = forward, silver coin = backward). Can become a Riposte after a successful parry. |
+| Up | **High Roll** – A hitbox above Casino with a random size, always tall rather than wide. |
+| Down | **Low Roll** – Slams to the ground, then creates a hitbox of random size that is usually low to the floor. |
+| Side | **Wide Roll** – A hit to the side with a random length and height. |
+
+### Heavy
+
+| Direction | Move |
+|---|---|
+| Neutral | **Wild Card** – Performs a random move from any character, including Casino's own (except Wild Card and Coin Toss). Costs of borrowed moves are ignored. Bombhead's self-destruct is in the pool and will blow up Casino too. |
+| Up | **Jackpot Dash** – After a short delay, dashes in any of eight directions (whatever you are holding when it fires; nothing held means straight up) with a hitbox around him, leaving a trail of lingering hitboxes. 1 in 10 dashes is a **Jackpot**: faster, much further and much stronger. |
+| Down | **Coin Toss** – Flips a coin for the Coin Meter. With a full meter, starts the Big Flip. |
+| Side | **Wild Punch** – A heavy sideways punch with a random delay and a random startup. |
 
 ---
 
