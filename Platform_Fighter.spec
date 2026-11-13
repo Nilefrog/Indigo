@@ -1,6 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-
 a = Analysis(
     ['Platform_Fighter.py'],
     pathex=[],
@@ -26,7 +25,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Platform_Fighter',
+    name='indigo',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -38,6 +37,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+
 coll = COLLECT(
     exe,
     a.binaries,
@@ -45,5 +45,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Platform_Fighter',
+    name='indigo - windows',
 )
