@@ -1,9 +1,10 @@
 from GameSnake import *
 from Controls import *      # per-player key / button layouts + saved settings
 from Menus import *         # main menu, settings, character select, pause
-import math, random, time, zlib, os
+import math, random, time, zlib, os, asyncio
 import Network                # online play: lobby server + client
 from OnlineMenus import online_menu
+from Remote import Remote     # phones used as controllers over the local Wi-Fi
 import MatchSystem as ms     # rules, lives, stats, crowns, match screens
 from types import SimpleNamespace
 
@@ -598,6 +599,7 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
     sprite_name = "player"            # sprite used by this fighter during a match
     preview = "player"                # sprite used on the character-select screen
     preview_size = 300                # how big to draw it there (a percentage, like Sprite.size)
+    remote = None                     # the id of the phone driving this player (see Remote.py), or None
     force_ko = False                  # set by effects that knock a player out directly (Casino's big flip). step_game collects it, respawn clears it
 
     def __init__(self,currentLevel, name, x=None, y=None, size=100, spawnIcon = "p", controls=None, pad=None, pad_controls=None, slot=None):
@@ -654,6 +656,8 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
     def held(self, action):
         if self.net is not None:
             return self.net.held(action)
+        if self.remote is not None and Remote.held(self.remote, action):      # a phone
+            return True
         key = self.controls.get(action) if self.controls is not None else None
         if key and Keyboard.held(key):
             return True
@@ -663,6 +667,8 @@ class Player(Sprite): #Generalised Player, Superclass for each Character
     def pressed(self, action):
         if self.net is not None:
             return self.net.pressed(action)
+        if self.remote is not None and Remote.pressed(self.remote, action):
+            return True
         key = self.controls.get(action) if self.controls is not None else None
         if key and Keyboard.pressed(key):
             return True
@@ -5126,7 +5132,7 @@ training = SimpleNamespace(active=False, dummy=None, hud=[],
 def others(player):                     # everyone a player's attacks can hit
     return [p for p in players if p is not player]
 
-def start_match(entries, rules, map_index=0, online=None):
+async def start_match(entries, rules, map_index=0, online=None):
     """entries comes straight from character_select(). online = None for a local match, or {'seed':..., 'names': {slot: name}}"""
     global players, hud, stock_hud, tags, crowns, all_stats, camera_zone, focus
     Screen.background = MATCH_BG
@@ -5147,7 +5153,12 @@ def start_match(entries, rules, map_index=0, online=None):
             if online:
                 controls, pad = None, None                  # buttons come from the network instead
             else:
-                controls, pad = (settings.keyboard[slot], None) if device[0] == "profile" else (None, device[1])
+                if device[0] == "profile":
+                    controls, pad = settings.keyboard[slot], None
+                elif device[0] == "remote":                  # a phone: its buttons are read through player.remote
+                    controls, pad = None, None
+                else:
+                    controls, pad = None, device[1]
             player = CHARACTERS[entry["character"]](
                 level, "player", 0, 0,
                 spawnIcon=str(slot + 1),
@@ -5158,6 +5169,9 @@ def start_match(entries, rules, map_index=0, online=None):
             )
         if online:
             player.net = NetInput()
+        if (not online) and (not entry.get("dummy")) and device is not None and device[0] == "remote":
+            player.remote = device[1]
+            Remote.assign(device[1], slot, PLAYER_COLOURS[slot])      # the phone shows which player it is
         player.facing = 1 if player.x < level.width / 2 else -1        # everyone starts looking towards the middle
         player.health = rules.start_damage
         player.stats = ms.PlayerStats(slot, str(entry["character"]), PLAYER_COLOURS[slot], rules.stocks if rules.is_stock else 0)
@@ -5183,10 +5197,13 @@ def start_match(entries, rules, map_index=0, online=None):
     Stage.camera.go_to(focus.x, focus.y)
     Stage.camera.follow(focus, 100)
     Stage.camera.limit_to(camera_zone)
-    Screen.update()                     # one frame to let the button that started the match pass, otherwise it would also pause / jump
+    Remote.set_in_match(True)                 # phones switch from their menu buttons to the fight buttons
+    await Screen.update()                     # one frame to let the button that started the match pass, otherwise it would also pause / jump
 
 def end_match():
     """Throws the whole fight away so the menus (and the next fight) start clean."""
+    Remote.set_in_match(False)
+    Remote.clear_assignments()
     global level, players, hud, stock_hud, tags, crowns, camera_zone
     if gamble.flip is not None:         # a big flip was still on screen when the match ended
         gamble.flip.delete()
@@ -5216,7 +5233,7 @@ def end_match():
     Screen.fps = 60
 
 def pause_requested():
-    if Keyboard.pressed("escape"):
+    if Keyboard.pressed("escape") or Remote.pause_pressed():
         return True
     return any(p.pad is not None and Gamepad.pressed(p.pad, "start") for p in players)
 
@@ -5367,18 +5384,18 @@ def update_ui(frame):
     if players:
         focus.track(players)
 
-def run_match():
+async def run_match():
     """Plays one match. Returns a MatchResult, or None if the players quit from the pause menu (or closed the window)."""
     frame = 0
     ms.State.frame = 0
     update_ui(0)
-    ms.countdown(lambda: update_ui(0))          # 3 - 2 - 1 - FIGHT!
+    await ms.countdown(lambda: update_ui(0))          # 3 - 2 - 1 - FIGHT!
     try:
         while Screen.running:
             if pause_requested():
-                if pause_menu() == "quit":
+                if await pause_menu() == "quit":
                     return None
-                Screen.update()         # same again: the button that closed the pause menu mustn't also jump or attack
+                await Screen.update()         # same again: the button that closed the pause menu mustn't also jump or attack
 
             step_game(frame, not match.finishing)
             frame += 1
@@ -5386,7 +5403,7 @@ def run_match():
             if not match.finishing:
                 check_time_up(frame)
             update_ui(frame)
-            Screen.update()
+            await Screen.update()
 
             if match.finishing:
                 match.finishing -= 1
@@ -5473,7 +5490,7 @@ def wait_for_bundle(client, frame, waiting):
             time.sleep(0.001)
     return None
 
-def run_online_match(client, delay, names):
+async def run_online_match(client, delay, names):
     """Plays one online match. Returns (outcome, MatchResult or None). Outcome: done / left / lost / desync / quit."""
     frame = 0
     ms.State.frame = 0
@@ -5481,7 +5498,7 @@ def run_online_match(client, delay, names):
     for f in range(delay):                      # nobody can have pressed anything yet: the first frames are neutral
         client.send_input(f, 0, 0)
     update_ui(0)
-    ms.countdown(lambda: update_ui(0))
+    await ms.countdown(lambda: update_ui(0))
     waiting = Text("Waiting for other players...", Screen.width / 2, 110, 34, "white", outline=3)
     waiting.hide()
     leave_armed = 0
@@ -5518,7 +5535,7 @@ def run_online_match(client, delay, names):
             if frame % 30 == 0:
                 client.send({"t": "hash", "f": frame, "h": state_hash()})
             update_ui(frame)
-            Screen.update()
+            await Screen.update()
 
             if match.finishing:
                 match.finishing -= 1
@@ -5531,26 +5548,26 @@ def run_online_match(client, delay, names):
         for p in players:
             p.visible = True
 
-def play_online_match(client, payload):
+async def play_online_match(client, payload):
     """Called by the online lobby when the host starts a match. Returns True if this player wants a rematch."""
     online_rules = ms.Rules()
     online_rules.load(payload["rules"])
     entries = [{"slot": e["slot"], "character": e["character"]} for e in payload["entries"]]
     names = {e["slot"]: e["name"] for e in payload["entries"]}
     map_index = payload["map"] if 0 <= payload["map"] < len(MAPS) else 0
-    start_match(entries, online_rules, map_index, online={"seed": payload["seed"], "names": names})
-    outcome, result = run_online_match(client, payload["delay"], names)
+    await start_match(entries, online_rules, map_index, online={"seed": payload["seed"], "names": names})
+    outcome, result = await run_online_match(client, payload["delay"], names)
     end_match()
     Screen.background = MENU_BG
     if outcome == "done":
         client.send({"t": "match_done"})
         result.map_name = MAPS[map_index]["name"]
-        return ms.results_screen(result, PLAYER_COLOURS) == "rematch"      # (no lifetime wins / crown online: seats aren't people)
+        return await ms.results_screen(result, PLAYER_COLOURS) == "rematch"      # (no lifetime wins / crown online: seats aren't people)
     if outcome in ("desync", "lost"):
         client.send({"t": "leave_match"})
         why = ("The two games stopped agreeing with each other. Make sure everyone has the same files (and OS)."
                if outcome == "desync" else "The connection to the server was lost.")
-        Menu("Match ended", [Item("OK", result="ok")], subtitle=why, spacing=68, width=420, back_result="ok").run()
+        await Menu("Match ended", [Item("OK", result="ok")], subtitle=why, spacing=68, width=420, back_result="ok").run()
     return False
 
 #==========================================================
@@ -5592,7 +5609,7 @@ def training_reset():
 def training_reset_requested():
     return Keyboard.pressed("r") or any(p.pad is not None and Gamepad.pressed(p.pad, "back") for p in players)
 
-def training_pause_menu():
+async def training_pause_menu():
     """Returns resume / reset / select / map / quit."""
     dim = Box(Screen.width, Screen.height, "black", Screen.width / 2, Screen.height / 2, alpha=170)
 
@@ -5617,11 +5634,11 @@ def training_pause_menu():
                                      ("Auto-Reset Damage", lambda: "On" if training.auto_reset else "Off", toggle_auto)):
             items.append(Item(label, value=value, on_left=lambda c=change: c(-1), on_right=lambda c=change: c(1)))
     items += [Item("Change Fighter", result="select"), Item("Change Map", result="map"), Item("Quit to Menu", result="quit")]
-    result = Menu("Training", items, hint="Left / Right: change     Esc to resume", spacing=56, width=620, back_result="resume").run()
+    result = await Menu("Training", items, hint="Left / Right: change     Esc to resume", spacing=56, width=620, back_result="resume").run()
     dim.delete()
     return result or "quit"
 
-def start_training(entries, map_index):
+async def start_training(entries, map_index):
     rules = ms.Rules()
     rules.mode, rules.stocks, rules.minutes, rules.shield, rules.sudden_death = "Stock", 10, 0, 0, False
     entries = list(entries)
@@ -5630,7 +5647,7 @@ def start_training(entries, map_index):
     training.combo, training.combo_damage, training.last_hit, training.best, training.since_hit = 0, 0.0, 0.0, 0, 999
     if free is not None:                                            # (with four humans there's no seat left for the dummy)
         entries.append({"slot": free, "character": "Dummy", "dummy": True})
-    start_match(entries, rules, map_index)
+    await start_match(entries, rules, map_index)
     training.hud = [Text("", 0, 0, 28, "white", outline=3) for _ in range(4)]
     training.hud.append(Text("R / Back: reset     Esc / Start: training menu", Screen.width / 2, 66, 20, (140, 140, 170), outline=1))
     if training.dummy is not None:
@@ -5653,7 +5670,7 @@ def training_update_ui(frame):
         t.colour = ms.GOLD if combo_on and i < 2 else "white"
         t.x, t.y = 18 + t.width / 2, 30 + i * 32
 
-def run_training():
+async def run_training():
     """Plays until the player picks something that leaves training. Returns 'select', 'map' or 'quit'."""
     frame = 0
     ms.State.frame = 0
@@ -5661,12 +5678,12 @@ def run_training():
     try:
         while Screen.running:
             if pause_requested():
-                choice = training_pause_menu()
+                choice = await training_pause_menu()
                 if choice in ("select", "map", "quit"):
                     return choice
                 if choice == "reset":
                     training_reset()
-                Screen.update()         # the button that closed the menu mustn't also jump or attack
+                await Screen.update()         # the button that closed the menu mustn't also jump or attack
             if training_reset_requested():
                 training_reset()
             if training.dummy is not None:
@@ -5678,84 +5695,90 @@ def run_training():
             if training.auto_reset and training.since_hit == TRAINING_AUTO_RESET and training.dummy is not None:
                 training.dummy.health = training.reset_damage
             training_update_ui(frame)
-            Screen.update()
+            await Screen.update()
         return "quit"
     finally:
         Screen.fps = 60
         for p in players:
             p.visible = True
 
-def training_mode():
+async def training_mode():
     """Fighter -> map -> practice. Returns to the main menu when the player quits."""
     pick = lambda: character_select(settings, CHARACTERS, min_players=1, title="Training - Choose Your Fighter")
-    entries = pick()
+    entries = await pick()
     step = "map"
     while entries and Screen.running:
         if step == "map":
-            picked = ms.map_select(MAPS, ms.records.map_choice)
+            picked = await ms.map_select(MAPS, ms.records.map_choice)
             if picked is None:                                      # backed out: pick fighters again
-                entries = pick()
+                entries = await pick()
                 continue
             ms.records.set_map_choice(picked[0])
             map_index, step = picked[1], "play"
-        start_training(entries, map_index)
-        outcome = run_training()
+        await start_training(entries, map_index)
+        outcome = await run_training()
         end_match()
         Screen.background = MENU_BG
         if outcome == "select":
-            entries, step = pick(), "map"
+            entries, step = await pick(), "map"
         elif outcome == "map":
             step = "map"
         else:
             break
 
 #GAMELOOP
-Screen.background = MENU_BG
-rules = ms.load_rules()
-while Screen.running:
-    choice = main_menu(settings)
-    if choice == "online":
-        online_menu(settings, CHARACTERS, MAPS, rules, ONLINE_BUILD, play_online_match)
-        Screen.background = MENU_BG
-        continue
-    if choice == "training":
-        training_mode()
-        Screen.background = MENU_BG
-        continue
-    if choice != "play":
-        break
-    entries = character_select(settings, CHARACTERS)
-    step = "map"                                                    # which screen comes next: "map" -> "rules" -> fight
-    while entries and Screen.running:
-        if step == "map":
-            picked = ms.map_select(MAPS, ms.records.map_choice)
-            if picked is None:                                      # backed out: pick fighters again
-                entries = character_select(settings, CHARACTERS)
-                continue
-            ms.records.set_map_choice(picked[0])
-            map_index = picked[1]
-            step = "rules"
-        if not ms.rules_menu(rules, entries, PLAYER_COLOURS, MAPS[map_index]["name"]):
-            step = "map"                                            # backed out of the rules: pick the map again
-            continue
-        while Screen.running:                                       # one pass = one match (so "Rematch" is just another pass)
-            start_match(entries, rules, map_index)
-            result = run_match()
-            end_match()
+async def main():
+    global rules                           # (a few helpers read the match rules as a global)
+    Screen.background = MENU_BG
+    rules = ms.load_rules()
+    while Screen.running:
+        choice = await main_menu(settings)
+        if choice == "online":
+            await online_menu(settings, CHARACTERS, MAPS, rules, ONLINE_BUILD, play_online_match)
             Screen.background = MENU_BG
-            if result is None:                                      # quit from the pause menu
-                entries = None
-                break
-            result.map_name = MAPS[map_index]["name"]
-            ms.records.award(result)                                # wins + the crown
-            action = ms.results_screen(result, PLAYER_COLOURS)
-            if action == "rematch":
+            continue
+        if choice == "training":
+            await training_mode()
+            Screen.background = MENU_BG
+            continue
+        if choice != "play":
+            break
+        entries = await character_select(settings, CHARACTERS)
+        step = "map"                                                    # which screen comes next: "map" -> "rules" -> fight
+        while entries and Screen.running:
+            if step == "map":
+                picked = await ms.map_select(MAPS, ms.records.map_choice)
+                if picked is None:                                      # backed out: pick fighters again
+                    entries = await character_select(settings, CHARACTERS)
+                    continue
+                ms.records.set_map_choice(picked[0])
+                map_index = picked[1]
+                step = "rules"
+            if not await ms.rules_menu(rules, entries, PLAYER_COLOURS, MAPS[map_index]["name"]):
+                step = "map"                                            # backed out of the rules: pick the map again
                 continue
-            if action == "select":
-                entries = character_select(settings, CHARACTERS)
-                step = "map"
-            elif action == "menu":
-                entries = None
-            elif action == "map":
-                step = "map"
-            break                                                   # "rules" falls out to the rules menu again
+            while Screen.running:                                       # one pass = one match (so "Rematch" is just another pass)
+                await start_match(entries, rules, map_index)
+                result = await run_match()
+                end_match()
+                Screen.background = MENU_BG
+                if result is None:                                      # quit from the pause menu
+                    entries = None
+                    break
+                result.map_name = MAPS[map_index]["name"]
+                ms.records.award(result)                                # wins + the crown
+                action = await ms.results_screen(result, PLAYER_COLOURS)
+                if action == "rematch":
+                    continue
+                if action == "select":
+                    entries = await character_select(settings, CHARACTERS)
+                    step = "map"
+                elif action == "menu":
+                    entries = None
+                elif action == "map":
+                    step = "map"
+                break                                                   # "rules" falls out to the rules menu again
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

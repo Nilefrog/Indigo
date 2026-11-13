@@ -1,6 +1,7 @@
 from GameSnake import *
 from Controls import *
-import pygame
+import pygame, inspect
+from Remote import Remote   # phones used as controllers (see Remote.py)
 import MatchSystem as ms     # crowns + the renameable match awards
 
 #Really, Really Overly Complicated Menu System, That Is essentially verbatim copied from around the internet.
@@ -69,6 +70,18 @@ class Nav:
                 down.add((pad, "back"))
             if Gamepad.held(i, "start"):
                 down.add((pad, "start"))
+
+        for cid in list(Remote.clients):                    # phones used as controllers
+            phone = ("remote", cid)
+            for d in _DIRS:
+                if Remote.held(cid, d):
+                    down.add((phone, d))
+            if Remote.held(cid, "confirm"):
+                down.add((phone, "confirm"))
+            if Remote.held(cid, "back"):
+                down.add((phone, "back"))
+            if Remote.held(cid, "pause"):                    # the phone's START button
+                down.add((phone, "start"))
 
         if self.profiles:
             for slot in range(MAX_PLAYERS):
@@ -155,17 +168,24 @@ class Menu:
         self._sprites = []
 
     #Runs the menu until something closes it. Returns that item's result (None if the window was closed)
-    def run(self):
+    async def run(self):
+        Remote.menu_opened()                         # phones show their menu buttons while any menu is on screen
+        try:
+            return await self._run()
+        finally:
+            Remote.menu_closed()
+
+    async def _run(self):
         self._nav = Nav()
         last_mouse = (Mouse.x, Mouse.y)
         result = None
         while Screen.running and result is None:
-            Screen.update()
+            await Screen.update()
             nav = self._nav
             for device, action in nav.poll():
                 if action == "start" and device[0] == "key":     # Enter already counts as "confirm", so don't press it twice
                     continue
-                result = self._handle(action)
+                result = await self._handle(action)
                 if result is not None or self._nav is not nav:   # (a screen opened from here makes a fresh Nav, so the old events are stale)
                     break
 
@@ -179,12 +199,12 @@ class Menu:
                     for i, item in enumerate(self.items):
                         if item.enabled and item.box.touching_mouse():
                             self.selected = i
-                            result = self._activate()
+                            result = await self._activate()
             self._refresh()
         self.close()
         return result
 
-    def _handle(self, action):
+    async def _handle(self, action):
         item = self.items[self.selected]
         if action == "up":
             self._move(-1)
@@ -195,7 +215,7 @@ class Menu:
         elif action == "right" and item.on_right:
             item.on_right()
         elif action in ("confirm", "start"):
-            return self._activate()
+            return await self._activate()
         elif action == "back":
             return self.back_result
         return None
@@ -206,7 +226,7 @@ class Menu:
             if self.items[self.selected].enabled:
                 return
 
-    def _activate(self):
+    async def _activate(self):
         item = self.items[self.selected]
         if not item.enabled:
             return None
@@ -214,7 +234,9 @@ class Menu:
             return item.result
         if item.on_confirm:
             self._hide()
-            item.on_confirm()
+            outcome = item.on_confirm()
+            if inspect.isawaitable(outcome):     # a lambda that opens another screen hands back its coroutine
+                await outcome
             self._nav = Nav()
             self._show()
         return None
@@ -246,17 +268,18 @@ class Menu:
 # MAIN MENU + SETTINGS
 #==========================================================
 
-def main_menu(settings, title="PLATFORM FIGHTER"):
+async def main_menu(settings, title="PLATFORM FIGHTER"):
     items = [Item("Play", result="play"),
              Item("Training", result="training"),
              Item("Online", result="online"),
+             Item("Phone Controllers", on_confirm=remote_menu),
              Item("Settings", on_confirm=lambda: settings_menu(settings)),
              Item("Quit", result="quit")]
-    return Menu(title, items, hint="Arrows / WASD / controller to move     Enter / Space / A to pick",
+    return await Menu(title, items, hint="Arrows / WASD / controller to move     Enter / Space / A to pick",
                 spacing=68, width=420, back_result=None).run()
 
 
-def settings_menu(settings):
+async def settings_menu(settings):
     def toggle_fullscreen():
         settings.fullscreen = not settings.fullscreen
         settings.apply()
@@ -276,22 +299,22 @@ def settings_menu(settings):
                   on_confirm=cycle_volume, on_left=lambda: change_volume(-10), on_right=lambda: change_volume(10)),
              Item("Award Names", on_confirm=awards_menu),
              Item("Back", result="back")]
-    Menu("Settings", items, hint="Left / Right to change     Esc to go back", spacing=64, width=520).run()
+    await Menu("Settings", items, hint="Left / Right to change     Esc to go back", spacing=64, width=520).run()
     settings.save()
 
 
-def controls_menu(settings):
+async def controls_menu(settings):
     def summary(slot):
         return "Keyboard + Controller" if settings.has_keyboard(slot) else "Controller only"
 
     items = [Item(f"Player {slot + 1}", value=lambda s=slot: summary(s),
                   on_confirm=lambda s=slot: player_controls_menu(settings, s)) for slot in range(MAX_PLAYERS)]
     items.append(Item("Back", result="back"))
-    Menu("Controls", items, subtitle="Every player has their own keyboard and controller layout",
+    await Menu("Controls", items, subtitle="Every player has their own keyboard and controller layout",
          hint="Pick a player to change their controls     Esc to go back", spacing=64, width=700).run()
 
 
-def player_controls_menu(settings, slot):
+async def player_controls_menu(settings, slot):
     tab = ["keyboard"]                                           # a list, so the little functions below can change it
 
     def flip_tab():
@@ -315,13 +338,13 @@ def player_controls_menu(settings, slot):
                           on_confirm=lambda a=action: _capture(settings, slot, a, tab[0])))
     items.append(Item("Reset to Default", on_confirm=reset))
     items.append(Item("Back", result="back"))
-    Menu(f"Player {slot + 1} Controls", items, hint="Left / Right: keyboard or controller     Enter: change a control     Esc: back",
+    await Menu(f"Player {slot + 1} Controls", items, hint="Left / Right: keyboard or controller     Enter: change a control     Esc: back",
          spacing=42, width=620, title_colour=PLAYER_COLOURS[slot]).run()
     settings.save()
 
 
 #Waits for the player to press the key / button they want. Escape cancels. Returns True if something was bound.
-def _capture(settings, slot, action, device):
+async def _capture(settings, slot, action, device):
     cx, cy = Screen.width / 2, Screen.height / 2
     sprites = [Box(Screen.width, Screen.height, "black", cx, cy, alpha=235),
                Text(ACTION_LABELS[action].upper(), cx, cy - 80, 60, PLAYER_COLOURS[slot], outline=3),
@@ -332,7 +355,7 @@ def _capture(settings, slot, action, device):
 
     bound = False
     while Screen.running and not bound:
-        Screen.update()
+        await Screen.update()
         if Keyboard.pressed("escape"):
             break
         if device == "keyboard":
@@ -388,7 +411,7 @@ def _typed_this_frame():
 
 
 #Pops up a box where the player types. Enter saves, Escape cancels. Returns the new text, or None if they cancelled.
-def _text_entry(prompt, current, hint_text="", max_len=ms.AWARD_MAX_LEN):
+async def _text_entry(prompt, current, hint_text="", max_len=ms.AWARD_MAX_LEN):
     cx, cy = Screen.width / 2, Screen.height / 2
     sprites = [Box(Screen.width, Screen.height, "black", cx, cy, alpha=235),
                Text(prompt, cx, cy - 130, 40, GOLD, outline=3)]
@@ -404,7 +427,7 @@ def _text_entry(prompt, current, hint_text="", max_len=ms.AWARD_MAX_LEN):
     result = None
     done = False
     while Screen.running and not done:
-        Screen.update()
+        await Screen.update()
         chars, backspace, enter, escape = _typed_this_frame()
         if escape:
             done = True
@@ -432,9 +455,72 @@ def _text_entry(prompt, current, hint_text="", max_len=ms.AWARD_MAX_LEN):
     return result
 
 
-def awards_menu():
-    def rename(key, what):
-        new = _text_entry(f"Rename:  {what}", ms.records.award_label(key), "Shown on the match end screen")
+#The "Phone Controllers" screen: shows the address (and a QR code if the optional qrcode package is installed) and who has connected.
+async def remote_menu():
+    try:
+        url = await Remote.start()
+    except OSError:
+        url = None
+    cx = Screen.width / 2
+    sprites = [Text("Phone Controllers", cx, 70, 60, GOLD, outline=3)]
+    qr_overlay = None
+    if url is None:
+        sprites.append(Text("Couldn't start: every network port from 8765 to 8784 is busy.", cx, 300, 28, RED))
+    else:
+        sprites += [Text("1. Join the same Wi-Fi as this computer", cx, 150, 28, WHITE),
+                    Text("2. On the phone, scan the code or type this address into its browser:", cx, 190, 28, WHITE),
+                    Text(url, cx, 245, 34 if len(url) < 40 else 28, GOLD, outline=2)]
+        qr_overlay = _qr_overlay(url, cx, 440, 250)
+        if qr_overlay is not None:
+            Screen.overlays.append(qr_overlay)
+        else:
+            sprites.append(Text("(install the 'qrcode' package to show a scan-able code here)", cx, 400, 20, GREY))
+        sprites.append(Text("3. At the Play screen press OK on the phone to join. It shows the game too.", cx, 590, 26, WHITE))
+    status = Text("", cx, 635, 26, GREEN)
+    sprites += [status, Text("Back: return", cx, Screen.height - 24, 20, GREY)]
+
+    nav = Nav()
+    try:
+        done = False
+        while Screen.running and not done:
+            await Screen.update()
+            names = [Remote.label(cid) for cid in Remote.clients]
+            status.text = ("Connected: " + ", ".join(names)) if names else "Waiting for a phone..."
+            for device, action in nav.poll():
+                if action in ("back", "confirm", "start"):
+                    done = True
+    finally:
+        if qr_overlay is not None and qr_overlay in Screen.overlays:
+            Screen.overlays.remove(qr_overlay)
+        for s in sprites:
+            s.delete()
+
+
+def _qr_overlay(url, cx, cy, size):
+    """A function that draws a QR code of url on every frame, or None if the optional 'qrcode' package isn't installed."""
+    try:
+        import qrcode
+        qr = qrcode.QRCode(border=0)
+        qr.add_data(url)
+        qr.make(fit=True)
+        matrix = qr.get_matrix()
+    except Exception:
+        return None
+    modules = len(matrix)
+    cell = max(2, size // (modules + 4))                       # +4 = the white margin a scanner needs
+    side = cell * (modules + 4)
+    surf = pygame.Surface((side, side))
+    surf.fill((255, 255, 255))
+    for y, row in enumerate(matrix):
+        for x, dark in enumerate(row):
+            if dark:
+                surf.fill((0, 0, 0), ((x + 2) * cell, (y + 2) * cell, cell, cell))
+    return lambda screen: screen.blit(surf, (cx - side / 2, cy - side / 2))
+
+
+async def awards_menu():
+    async def rename(key, what):
+        new = await _text_entry(f"Rename:  {what}", ms.records.award_label(key), "Shown on the match end screen")
         if new is not None:
             ms.records.set_award_name(key, new)
 
@@ -446,7 +532,7 @@ def awards_menu():
              for key, _, what, _, _ in ms.AWARD_DEFS]
     items.append(Item("Reset All to Default", on_confirm=reset_all))
     items.append(Item("Back", result="back"))
-    Menu("Award Names", items, subtitle="Pick an award to type your own name for it",
+    await Menu("Award Names", items, subtitle="Pick an award to type your own name for it",
          hint="Enter: rename (keyboard needed to type)     Esc: back", spacing=60, width=1000, title_colour=GOLD).run()
 
 
@@ -454,10 +540,10 @@ def awards_menu():
 # PAUSE
 #==========================================================
 
-def pause_menu():
+async def pause_menu():
     dim = Box(Screen.width, Screen.height, "black", Screen.width / 2, Screen.height / 2, alpha=170)    # made first, so it sits BEHIND the menu's text
     items = [Item("Resume", result="resume"), Item("Quit to Menu", result="quit")]
-    result = Menu("Paused", items, hint="Esc to resume", spacing=68, width=420, back_result="resume").run()
+    result = await Menu("Paused", items, hint="Esc to resume", spacing=68, width=420, back_result="resume").run()
     dim.delete()
     return result
 
@@ -470,7 +556,7 @@ def pause_menu():
 #   so adding a character to the game adds it to this screen automatically.
 #==========================================================
 
-def character_select(settings, characters, min_players=2, title="Choose Your Fighter"):
+async def character_select(settings, characters, min_players=2, title="Choose Your Fighter"):
     W, H = Screen.width, Screen.height
     names = list(characters)
     tiles = names + ["Random"]
@@ -599,7 +685,8 @@ def character_select(settings, characters, min_players=2, title="Choose Your Fig
             tx, ty = tile_pos(p["cursor"])
             tags[slot].text = f"[P{slot + 1}]" if p["locked"] else f"P{slot + 1}"
             tags[slot].go_to(tx + (here.index(slot) - (len(here) - 1) / 2) * 58, ty + tile_h / 2 - 16)
-            devices[slot].text = "Keyboard" if p["device"][0] == "profile" else f"Controller {p['device'][1] + 1}"
+            devices[slot].text = ("Keyboard" if p["device"][0] == "profile" else
+                                  Remote.label(p["device"][1]) if p["device"][0] == "remote" else f"Controller {p['device'][1] + 1}")
             bodies[slot].text, bodies[slot].font_size, bodies[slot].colour = title_of(tile), 38, WHITE
             if p["locked"]:
                 subs[slot].text, subs[slot].colour = "READY", GREEN
@@ -619,7 +706,7 @@ def character_select(settings, characters, min_players=2, title="Choose Your Fig
     result, done = None, False
     refresh()
     while Screen.running and not done:
-        Screen.update()
+        await Screen.update()
         for device, action in nav.poll():
             kind = device[0]
             if kind == "key":

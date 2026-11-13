@@ -1,4 +1,4 @@
-import os,math,random,time,pygame,sys,textwrap
+import os,math,random,time,pygame,sys,textwrap,asyncio
 
 __all__ = ["random_number","random_float","Screen","color","colour","Keyboard","Mouse","Gamepad","Sprite","Stage","Sound","Zone","TileMap","Particles","Text","Box"]
 
@@ -84,6 +84,8 @@ class _Screen():
         self.running = True
         self.background = "white"
         self._freeze = 0                   # NEW: how many frames of hitstop are still waiting to be played
+        self.frame_hooks = []              # NEW: functions called at the start of every frame (Remote.py works out which phone buttons were just pressed)
+        self.overlays = []                 # NEW: functions called with the finished picture just before it is shown (the QR code; Remote.py also copies the picture to phones)
         self._screen_set()
 
     def _screen_set(self): # This is called internally, to apply your changes after you set them
@@ -103,20 +105,22 @@ class _Screen():
     #Remember to do Screen.update() At The End of Your Gameloop!
 
     #This is probably the most important function in the code
-    def update(self):
+    async def update(self):
         Keyboard._new_frame()
         Mouse._new_frame()
+        for hook in self.frame_hooks:
+            hook()
         self._read_events()
         Gamepad._poll()                    # NEW: controllers are read once per frame, just like the keyboard
 
-        self._show_frame(advance=True)
+        await self._show_frame(advance=True)
 
         #NEW: Hitstop! If Screen.hitstop() was called during this frame, we hold the picture here for a few frames.
         #Your game loop is stuck inside this function while we do, so EVERYTHING freezes without you changing any code.
         while self._freeze > 0 and self.running:
             self._freeze -= 1
             self._read_events()            # still listen to the keyboard, WITHOUT clearing it, so a button pressed during the freeze still counts afterwards
-            self._show_frame(advance=False)
+            await self._show_frame(advance=False)
 
     #Reads everything the window has told us since last time (key presses, clicks, the window being closed)
     def _read_events(self):
@@ -127,11 +131,14 @@ class _Screen():
             Mouse._handle(event)
 
     #Draws one frame and waits for the next one. advance=False redraws the exact same picture (nothing moves)
-    def _show_frame(self, advance):
+    async def _show_frame(self, advance):
         Stage._draw_frame(advance)          #Draw order -> camera, backdrop, tiles, sprites, particles, then zones
+        for overlay in self.overlays:       #NEW: finished-picture hooks (QR code, and the copy of the screen that phones show)
+            overlay(self.surface)
         pygame.display.flip()
         self.surface.fill(self.background)
         _clock.tick(self.fps)
+        await asyncio.sleep(0)              # hands control back to the browser for a moment (required on the web, free on desktop)
 
     #NEW: Freezes the whole game for a few frames. Great for making big hits feel heavy!
     #Example: Screen.hitstop(6) freezes for 6 frames (a tenth of a second at 60 fps)
@@ -217,6 +224,10 @@ def _find_sound(name):
         path = os.path.join(folder, name + ext)
         if os.path.isfile(path):
             return path
+    for file in sorted(os.listdir(folder)):                  # same name with different capitals (Windows doesn't mind, Linux and browsers do)
+        base, ext = os.path.splitext(file)
+        if base.lower() == name.lower() and ext.lower() in _SOUND_TYPES:
+            return os.path.join(folder, file)
     found = sorted({os.path.splitext(f)[0] for f in os.listdir(folder)})
     raise FileNotFoundError(f"Error!: Could Not Find '{name}' in your 'sounds' folder. Found: {', '.join(found) or 'Nothing'}")
 
@@ -541,13 +552,18 @@ def _get_font(name, size, bold, italic):
     if key not in _font_cache:
         font = None
         if name is not None:               # first look in a folder called "fonts" next to your script, then at the fonts installed on the computer
-            for ext in _FONT_TYPES:
-                path = os.path.join(_project_dir, "fonts", name + ext)
-                if os.path.isfile(path):
-                    font = pygame.font.Font(path, size)
-                    break
+            folder = os.path.join(_project_dir, "fonts")
+            if os.path.isdir(folder):                         # compared in lower case, because "Pixelart.TTF" is a different file to "Pixelart.ttf" on Linux and in the browser
+                for file in sorted(os.listdir(folder)):
+                    base, ext = os.path.splitext(file)
+                    if base.lower() == name.lower() and ext.lower() in _FONT_TYPES:
+                        font = pygame.font.Font(os.path.join(folder, file), size)
+                        break
             if font is None:
-                font = pygame.font.SysFont(name, size)
+                try:
+                    font = pygame.font.SysFont(name, size)
+                except Exception:                             # no system fonts at all (a browser): use pygame's built in one
+                    font = pygame.font.Font(None, size)
         else:
             font = pygame.font.Font(None, size)
         font.set_bold(bold)

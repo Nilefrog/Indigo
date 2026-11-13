@@ -16,8 +16,8 @@ import Network
 __all__ = ["online_menu"]
 
 
-def _notice(title, text):
-    Menu(title, [Item("OK", result="ok")], subtitle=text, spacing=68, width=420, back_result="ok").run()
+async def _notice(title, text):
+    await Menu(title, [Item("OK", result="ok")], subtitle=text, spacing=68, width=420, back_result="ok").run()
 
 def _set_visible(sprites, on):
     for s in sprites:
@@ -73,13 +73,13 @@ def _step(rows, selected, direction):
 # ONLINE MENU
 #==========================================================
 
-def online_menu(settings, characters, maps, rules, build, play_match):
+async def online_menu(settings, characters, maps, rules, build, play_match):
     """characters = {name: class}, maps = MAPS, rules = ms.Rules, build = fingerprint of the game files,
     play_match(client, payload) = runs one online match (returns True for a rematch)."""
     ctx = dict(settings=settings, characters=characters, maps=maps, rules=rules, build=build, play_match=play_match)
 
-    def rename():
-        new = _text_entry("Your online name", settings.online_name, "Other players see this", max_len=16)
+    async def rename():
+        new = await _text_entry("Your online name", settings.online_name, "Other players see this", max_len=16)
         if new and new.strip():
             settings.online_name = new.strip()
             settings.save()
@@ -89,25 +89,25 @@ def online_menu(settings, characters, maps, rules, build, play_match):
                  Item("Host a Server", result="host"),
                  Item("Player Name", value=lambda: settings.online_name, on_confirm=rename),
                  Item("Back", result="back")]
-        choice = Menu("Online", items, subtitle="Play with friends over the internet",
+        choice = await Menu("Online", items, subtitle="Play with friends over the internet",
                       hint="Online uses your Player 1 keyboard controls (or your first controller)     Esc: back",
                       spacing=64, width=620).run()
         if choice == "join":
-            _join_flow(ctx)
+            await _join_flow(ctx)
         elif choice == "host":
-            _host_flow(ctx)
+            await _host_flow(ctx)
         else:
             break
 
 
-def _connect(ctx, host, port, label):
+async def _connect(ctx, host, port, label):
     settings = ctx["settings"]
     job = Network.Connector(host, port, settings.online_name, ctx["build"])
     cx, cy = Screen.width / 2, Screen.height / 2
     sprites = [Text(f"Connecting to {label}...", cx, cy, 40, WHITE), Text("Esc to cancel", cx, cy + 60, 22, GREY)]
     cancelled = False
     while Screen.running and not job.done:
-        Screen.update()
+        await Screen.update()
         if Keyboard.pressed("escape"):
             cancelled = True
             break
@@ -116,53 +116,53 @@ def _connect(ctx, host, port, label):
         threading.Thread(target=lambda: (job.join(), job.client.close()), daemon=True).start()   # tidy up if it connects late
         return None
     if job.error:
-        _notice("Couldn't connect", job.error)
+        await _notice("Couldn't connect", job.error)
         return None
     return job.client
 
 
-def _join_flow(ctx):
+async def _join_flow(ctx):
     settings = ctx["settings"]
-    text = _text_entry("Server address", settings.last_address, "IP or name.  Add :port if it isn't 7777   (Shift + ; makes a colon)", max_len=60)
+    text = await _text_entry("Server address", settings.last_address, "IP or name.  Add :port if it isn't 7777   (Shift + ; makes a colon)", max_len=60)
     if not text or not text.strip():
         return
     try:
         host, port = Network.parse_address(text)
     except ValueError as e:
-        return _notice("Bad address", str(e))
+        return await _notice("Bad address", str(e))
     settings.last_address = text.strip()
     settings.save()
     label = f"{host}:{port}"
-    client = _connect(ctx, host, port, label)
+    client = await _connect(ctx, host, port, label)
     if client is None:
         return
     try:
         while Screen.running:
-            result = _browser(ctx, client, label)
+            result = await _browser(ctx, client, label)
             if result != "room":
                 break
-            if _room(ctx, client, label, None) == "lost":
-                _notice("Disconnected", client.reason or "Connection lost")
+            if await _room(ctx, client, label, None) == "lost":
+                await _notice("Disconnected", client.reason or "Connection lost")
                 break
     finally:
         client.close()
 
 
-def _host_flow(ctx):
+async def _host_flow(ctx):
     settings = ctx["settings"]
     host = Network.HostInfo(Network.DEFAULT_PORT)
     try:
         host.start()
     except OSError as e:
-        return _notice("Couldn't host", f"Port {host.port} is busy or blocked: {e}"[:80])
+        return await _notice("Couldn't host", f"Port {host.port} is busy or blocked: {e}"[:80])
     client = None
     try:
-        client = _connect(ctx, "127.0.0.1", host.port, "your own server")
+        client = await _connect(ctx, "127.0.0.1", host.port, "your own server")
         if client is None:
             return
         client.send({"t": "create", "name": f"{settings.online_name}'s Lobby", "max": MAX_PLAYERS})
-        if _room(ctx, client, "your server", host) == "lost":
-            _notice("Disconnected", client.reason or "Connection lost")
+        if await _room(ctx, client, "your server", host) == "lost":
+            await _notice("Disconnected", client.reason or "Connection lost")
     finally:
         if client:
             client.close()
@@ -173,7 +173,7 @@ def _host_flow(ctx):
 # LOBBY LIST
 #==========================================================
 
-def _browser(ctx, client, label):
+async def _browser(ctx, client, label):
     """Returns 'room' once you are inside a lobby, or 'leave'."""
     settings = ctx["settings"]
     W, H = Screen.width, Screen.height
@@ -189,7 +189,7 @@ def _browser(ctx, client, label):
     nav = Nav(settings)
     client.send({"t": "list"})
     while Screen.running and result is None:
-        Screen.update()
+        await Screen.update()
         frame += 1
         if frame % 90 == 0:
             client.send({"t": "list"})
@@ -236,7 +236,7 @@ def _browser(ctx, client, label):
                         client.send({"t": "join", "id": lob["id"]})
                 elif selected == len(lobbies):
                     _set_visible(sprites, False)
-                    name = _text_entry("Lobby name", f"{settings.online_name}'s Lobby", "", max_len=24)
+                    name = await _text_entry("Lobby name", f"{settings.online_name}'s Lobby", "", max_len=24)
                     _set_visible(sprites, True)
                     nav = Nav(settings)
                     if name and name.strip():
@@ -254,7 +254,7 @@ def _browser(ctx, client, label):
 # LOBBY ROOM
 #==========================================================
 
-def _room(ctx, client, label, host_info):
+async def _room(ctx, client, label, host_info):
     """Returns 'left' (you chose to leave) or 'lost' (connection died)."""
     settings, characters, maps, rules = ctx["settings"], list(ctx["characters"]), ctx["maps"], ctx["rules"]
     classes = ctx["characters"]
@@ -279,7 +279,7 @@ def _room(ctx, client, label, host_info):
         return next((m for m in lobby["members"] if m["slot"] == lobby["you"]), None)
 
     while Screen.running and result is None:
-        Screen.update()
+        await Screen.update()
         frame += 1
         lobby = client.lobby
         for msg in client.poll():
@@ -292,7 +292,7 @@ def _room(ctx, client, label, host_info):
                     if e["character"] not in classes:
                         e["character"] = characters[0]
                 _set_visible(sprites, False)
-                want_ready = bool(ctx["play_match"](client, msg))
+                want_ready = bool(await ctx["play_match"](client, msg))
                 Screen.background = MENU_BG
                 _set_visible(sprites, True)
                 nav = Nav(settings)
@@ -391,7 +391,7 @@ def _room(ctx, client, label, host_info):
                     client.send({"t": "set", "ready": not (me and me["ready"])})
                 elif selected == 2:
                     _set_visible(sprites, False)
-                    picked = ms.map_select(maps, cfg.get("map_tile", 0))
+                    picked = await ms.map_select(maps, cfg.get("map_tile", 0))
                     _set_visible(sprites, True)
                     if picked is not None:
                         client.send({"t": "config", "map_tile": picked[0], "rules": view_rules.to_dict()})
@@ -401,7 +401,7 @@ def _room(ctx, client, label, host_info):
                     rules.load(cfg.get("rules", {}))
                     entries = [{"slot": m["slot"], "character": title_of(m["character"])} for m in members]
                     _set_visible(sprites, False)
-                    ms.rules_menu(rules, entries, PLAYER_COLOURS, map_name)
+                    await ms.rules_menu(rules, entries, PLAYER_COLOURS, map_name)
                     Screen.background = MENU_BG
                     _set_visible(sprites, True)
                     client.send({"t": "config", "map_tile": cfg.get("map_tile", 0), "rules": rules.to_dict()})

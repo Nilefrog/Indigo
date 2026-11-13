@@ -1,0 +1,27 @@
+{
+  "crown_slot": 1,
+  "crown_character": "Casino",
+  "wins": [
+    2,
+    3,
+    0,
+    0
+  ],
+  "matches": [
+    5,
+    5,
+    0,
+    0
+  ],
+  "rules": {
+    "mode": "Stock",
+    "stocks": 3,
+    "minutes": 0,
+    "damage_mult": 1.0,
+    "start_damage": 0,
+    "shield": 2,
+    "sudden_death": true
+  },
+  "award_names": {},
+  "map_choice": 0
+}

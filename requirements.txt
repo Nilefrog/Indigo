@@ -4,3 +4,7 @@ pygame>=2.5.0
 # Optional: lets "Host a Server" open the router port automatically (UPnP).
 # Skip it if it fails to install; hosting still works with manual port forwarding.
 miniupnpc
+
+# Optional: shows a QR code on the "Phone Controllers" screen so phones can just scan it.
+# Skip it if it fails to install; the address is always shown in text as well.
+qrcode

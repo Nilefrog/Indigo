@@ -403,13 +403,13 @@ MENU_DARK = (16, 16, 26)
 # RULES MENU
 # ==========================================================
 
-def rules_menu(rules, entries, colours, map_name=""):
+async def rules_menu(rules, entries, colours, map_name=""):
     """Returns True to start the match, False to go back to character select."""
     layer = _Layer()
     old_background = Screen.background
     Screen.background = MENU_DARK
     W, H = Screen.width, Screen.height
-    Screen.update()                     # lets the button that opened this screen pass
+    await Screen.update()                     # lets the button that opened this screen pass
 
     layer.text("MATCH RULES", W / 2, 62, 72, GOLD, outline=4)
     if map_name:
@@ -489,7 +489,7 @@ def rules_menu(rules, entries, colours, map_name=""):
             description.text = "Ready? Press Enter / A to fight!"
         description.x = W / 2
         hint.x = W / 2
-        Screen.update()
+        await Screen.update()
 
     layer.clear()
     Screen.background = old_background
@@ -502,7 +502,7 @@ def rules_menu(rules, entries, colours, map_name=""):
 # IN MATCH UI
 # ==========================================================
 
-def countdown(update=None, each=48):
+async def countdown(update=None, each=48):
     """3 - 2 - 1 - FIGHT! Nobody can move until it's over."""
     W, H = Screen.width, Screen.height
     t = Text("", W / 2, H / 2 - 60, 160, "white", outline=6)
@@ -514,7 +514,7 @@ def countdown(update=None, each=48):
             t.font_size = 120 + int(80 * (1 - f / each) ** 2)       # pops in big, settles down
             if update:
                 update()
-            Screen.update()
+            await Screen.update()
     t.delete()
 
 
@@ -612,13 +612,13 @@ COLUMNS = (   # (heading, x, value)
 )
 
 
-def results_screen(result, colours):
+async def results_screen(result, colours):
     """Returns 'rematch', 'rules', 'select' or 'menu'."""
     layer = _Layer()
     old_background = Screen.background
     Screen.background = MENU_DARK
     W, H = Screen.width, Screen.height
-    Screen.update()
+    await Screen.update()
 
     # ---- title ----
     if result.draw:
@@ -688,7 +688,7 @@ def results_screen(result, colours):
         cursor.x = buttons[choice].x
         for i, b in enumerate(buttons):
             b.colour = GOLD if i == choice else "white"
-        Screen.update()
+        await Screen.update()
 
     layer.clear()
     Screen.background = old_background
@@ -737,14 +737,14 @@ class MapPreview(GameSnake._Drawn):
         return [("mappreview", image.convert_alpha())]
 
 
-def map_select(maps, choice=0):
+async def map_select(maps, choice=0):
     """maps = [{'name':..., 'blurb':..., 'layout':...}, ...]. A 'Random' tile is added on the end.
     Returns (tile_picked, map_index_to_play), or None if they backed out."""
     layer = _Layer()
     old_background = Screen.background
     Screen.background = MENU_DARK
     W, H = Screen.width, Screen.height
-    Screen.update()
+    await Screen.update()
     n = len(maps)
     total = n + 1
     choice = max(0, min(total - 1, choice))
@@ -795,7 +795,7 @@ def map_select(maps, choice=0):
             on = i == choice
             f.border_colour = (255, 215, 90) if on else (70, 70, 100)
             f.alpha = 50 if on else 0
-        Screen.update()
+        await Screen.update()
 
     layer.clear()
     Screen.background = old_background
